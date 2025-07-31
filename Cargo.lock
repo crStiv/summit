@@ -4913,6 +4913,7 @@ dependencies = [
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-macros",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
@@ -4940,6 +4941,7 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
