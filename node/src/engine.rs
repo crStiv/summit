@@ -15,7 +15,7 @@ use summit_application::finalizer::FinalizerMailbox;
 use summit_application::registry::Registry;
 use summit_types::{Block, Digest, PrivateKey, PublicKey};
 use tracing::{error, warn};
-
+use summit_application::engine_client::EngineClient;
 use crate::config::EngineConfig;
 
 /// To better support peers near tip during network instability, we multiply
@@ -38,9 +38,10 @@ const MAX_REPAIR: u64 = 20;
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     B: Blocker<PublicKey = PublicKey>,
+    C: EngineClient,
 > {
     context: E,
-    application: summit_application::Actor<E>,
+    application: summit_application::Actor<E, C>,
     buffer: buffered::Engine<E, PublicKey, Block>,
     buffer_mailbox: buffered::Mailbox<PublicKey, Block>,
     marshal: marshal::Actor<Block, E, MinPk, PublicKey, Registry>,
@@ -63,17 +64,17 @@ pub struct Engine<
 impl<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     B: Blocker<PublicKey = PublicKey>,
-> Engine<E, B>
+    C: EngineClient,
+> Engine<E, B, C>
 {
-    pub async fn new(context: E, cfg: EngineConfig, blocker: B) -> Self {
+    pub async fn new(context: E, cfg: EngineConfig<C>, blocker: B) -> Self {
         let identity = *public::<MinPk>(&cfg.polynomial);
         // create application
         let (application, application_mailbox, finalizer_mailbox) = summit_application::Actor::new(
             context.with_label("application"),
             ApplicationConfig {
+                engine_client: cfg.engine_client,
                 mailbox_size: cfg.mailbox_size,
-                engine_url: cfg.engine_url,
-                engine_jwt: cfg.engine_jwt,
                 partition_prefix: cfg.partition_prefix.clone(),
                 genesis_hash: cfg.genesis_hash,
             },
