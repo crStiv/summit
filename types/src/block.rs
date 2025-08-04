@@ -5,7 +5,11 @@ use alloy_primitives::{Bytes as AlloyBytes, U256};
 use alloy_rpc_types_engine::ExecutionPayloadV3;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize as _, Read, ReadExt as _, Write};
-use commonware_consensus::threshold_simplex::types::{Finalization, Notarization, Viewable};
+use commonware_consensus::Block as Bl;
+use commonware_consensus::{
+    Viewable,
+    threshold_simplex::types::{Finalization, Notarization},
+};
 use commonware_cryptography::{
     Committable, Digestible, Hasher, Sha256, bls12381::primitives::variant::MinPk, sha256::Digest,
 };
@@ -83,7 +87,19 @@ impl Block {
     }
 }
 
+impl Bl for Block {
+    fn height(&self) -> u64 {
+        self.height
+    }
+
+    fn parent(&self) -> Self::Commitment {
+        self.parent
+    }
+}
+
 impl Viewable for Block {
+    type View = u64;
+
     fn view(&self) -> commonware_consensus::simplex::types::View {
         self.height
     }
