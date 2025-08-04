@@ -119,7 +119,6 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                     let built = self.built_block.clone();
                     select! {
                             res = self.handle_proposal(parent, &mut marshal) => {
-
                                 match res {
                                     Ok(block) => {
                                         // store block
