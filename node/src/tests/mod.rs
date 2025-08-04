@@ -1,4 +1,4 @@
-use summit::test_harness::common::all_online;
+use crate::test_harness::common::all_online;
 use commonware_p2p::simulated::{self, Link, Network, Oracle, Receiver, Sender};
 use commonware_macros::test_traced;
 
