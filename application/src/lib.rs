@@ -13,5 +13,5 @@ pub use config::*;
 pub mod registry;
 pub use registry::*;
 
-mod engine_client;
+pub mod engine_client;
 pub mod finalizer;

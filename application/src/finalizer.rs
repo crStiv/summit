@@ -23,7 +23,7 @@ use crate::engine_client::EngineClient;
 
 const LATEST_KEY: [u8; 1] = [0u8];
 
-pub struct Finalizer<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> {
+pub struct Finalizer<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient> {
     context: R,
 
     last_indexed: u64,
@@ -32,17 +32,17 @@ pub struct Finalizer<R: Storage + Metrics + Clock + Spawner + governor::clock::C
 
     height_notify_mailbox: mpsc::Receiver<(u64, oneshot::Sender<()>)>,
 
-    engine_client: EngineClient,
+    engine_client: C,
 
     forkchoice: Arc<Mutex<ForkchoiceState>>,
 
     rx_finalizer_mailbox: mpsc::Receiver<(Block, oneshot::Sender<()>)>,
 }
 
-impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Finalizer<R> {
+impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient> Finalizer<R, C> {
     pub async fn new(
         context: R,
-        engine_client: EngineClient,
+        engine_client: C,
         forkchoice: Arc<Mutex<ForkchoiceState>>,
         db_prefix: String,
     ) -> (

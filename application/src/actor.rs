@@ -49,19 +49,19 @@ fn oneshot_closed_future<T>(sender: &mut oneshot::Sender<T>) -> ChannelClosedFut
     ChannelClosedFuture { sender }
 }
 
-pub struct Actor<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> {
+pub struct Actor<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient> {
     context: R,
     mailbox: mpsc::Receiver<Message>,
-    engine_client: EngineClient,
+    engine_client: C,
     forkchoice: Arc<Mutex<ForkchoiceState>>,
     built_block: Arc<Mutex<Option<Block>>>,
-    finalizer: Option<Finalizer<R>>,
+    finalizer: Option<Finalizer<R, C>>,
     tx_height_notify: mpsc::Sender<(u64, oneshot::Sender<()>)>,
     genesis_hash: [u8; 32],
 }
 
-impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Actor<R> {
-    pub async fn new(context: R, cfg: ApplicationConfig) -> (Self, Mailbox, FinalizerMailbox) {
+impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient> Actor<R, C> {
+    pub async fn new(context: R, cfg: ApplicationConfig<C>) -> (Self, Mailbox, FinalizerMailbox) {
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
 
         let genesis_hash = cfg.genesis_hash;
@@ -71,10 +71,9 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Acto
             finalized_block_hash: genesis_hash.into(),
         }));
 
-        let engine_client = EngineClient::new(cfg.engine_url.clone(), &cfg.engine_jwt);
         let (finalizer, finalizer_mailbox, tx_height_notify) = Finalizer::new(
             context.with_label("finalizer"),
-            engine_client.clone(),
+            cfg.engine_client.clone(),
             forkchoice.clone(),
             cfg.partition_prefix,
         )
@@ -84,7 +83,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Acto
             Self {
                 context,
                 mailbox: rx,
-                engine_client, // todo: why are these types dif?
+                engine_client: cfg.engine_client,
                 forkchoice,
                 built_block: Arc::new(Mutex::new(None)),
                 finalizer: Some(finalizer),
@@ -120,7 +119,6 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Acto
                     let built = self.built_block.clone();
                     select! {
                             res = self.handle_proposal(parent, &mut marshal) => {
-
                                 match res {
                                     Ok(block) => {
                                         // store block
