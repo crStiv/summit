@@ -18,7 +18,7 @@ use metrics::{counter, histogram};
 use rand::Rng;
 use summit_types::Block;
 use tracing::{info, warn};
-
+use summit_types::execution_request::ExecutionRequest;
 use crate::engine_client::EngineClient;
 
 const LATEST_KEY: [u8; 1] = [0u8];
@@ -40,6 +40,8 @@ pub struct Finalizer<
     forkchoice: Arc<Mutex<ForkchoiceState>>,
 
     rx_finalizer_mailbox: mpsc::Receiver<(Block, oneshot::Sender<()>)>,
+
+    execution_requests: Vec<ExecutionRequest>,
 }
 
 impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient>
@@ -81,6 +83,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 engine_client,
                 forkchoice,
                 rx_finalizer_mailbox,
+                execution_requests: Vec::new(),
             },
             FinalizerMailbox::new(tx_finalizer),
             tx_height_notify,
@@ -141,6 +144,17 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
 
                             *self.forkchoice.lock().expect("poisoned") = forkchoice;
 
+                            for request_bytes in block.execution_requests {
+                                match ExecutionRequest::try_from(request_bytes.as_ref()) {
+                                    Ok(execution_request) => {
+                                        self.execution_requests.push(execution_request);
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to parse execution request: {}", e);
+                                    }
+                                }
+
+                            }
                             info!(new_height, "finalized block");
                         }
 
