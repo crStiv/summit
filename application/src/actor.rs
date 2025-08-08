@@ -1,9 +1,4 @@
-use crate::{
-    ApplicationConfig,
-    engine_client::EngineClient,
-    finalizer::{Finalizer, FinalizerMailbox},
-    ingress::{Mailbox, Message},
-};
+use crate::{ApplicationConfig, engine_client::EngineClient, finalizer::{Finalizer, FinalizerMailbox}, ingress::{Mailbox, Message}, Registry};
 use alloy_rpc_types_engine::ForkchoiceState;
 use anyhow::{Result, anyhow};
 use commonware_consensus::marshal;
@@ -54,6 +49,7 @@ pub struct Actor<
     C: EngineClient,
 > {
     context: R,
+    registry: Registry,
     mailbox: mpsc::Receiver<Message>,
     engine_client: C,
     forkchoice: Arc<Mutex<ForkchoiceState>>,
@@ -87,6 +83,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         (
             Self {
                 context,
+                registry: cfg.registry,
                 mailbox: rx,
                 engine_client: cfg.engine_client,
                 forkchoice,

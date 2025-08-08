@@ -1,8 +1,12 @@
 use crate::engine_client::EngineClient;
+use crate::Registry;
 
 #[derive(Clone)]
 pub struct ApplicationConfig<C: EngineClient> {
     pub engine_client: C,
+    
+    pub registry: Registry,
+    
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.
     pub mailbox_size: usize,

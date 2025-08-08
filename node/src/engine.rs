@@ -69,11 +69,13 @@ impl<
 {
     pub async fn new(context: E, cfg: EngineConfig<C>, blocker: B) -> Self {
         let identity = *public::<MinPk>(&cfg.polynomial);
+        let registry = Registry::new(cfg.participants, cfg.polynomial, cfg.share);
         // create application
         let (application, application_mailbox, finalizer_mailbox) = summit_application::Actor::new(
             context.with_label("application"),
             ApplicationConfig {
                 engine_client: cfg.engine_client,
+                registry: registry.clone(),
                 mailbox_size: cfg.mailbox_size,
                 partition_prefix: cfg.partition_prefix.clone(),
                 genesis_hash: cfg.genesis_hash,
@@ -92,8 +94,6 @@ impl<
                 codec_config: (),
             },
         );
-
-        let registry = Registry::new(cfg.participants, cfg.polynomial, cfg.share);
 
         let (marshal, marshal_mailbox): (_, marshal::Mailbox<MinPk, Block>) = marshal::Actor::init(
             context.with_label("marshal"),
