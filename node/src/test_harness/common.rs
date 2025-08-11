@@ -1,34 +1,38 @@
 //use alto_types::{Finalized, Notarized};
 use commonware_cryptography::{
+    //ed25519::{PublicKey, PrivateKey},
+    PrivateKeyExt,
+    Signer,
     bls12381::{
         dkg::ops,
-        primitives::{poly::{self, Poly}, group::{self, Share}, variant::MinPk},
+        primitives::{
+            group::{self, Share},
+            poly::{self, Poly},
+            variant::MinPk,
+        },
     },
-    //ed25519::{PublicKey, PrivateKey},
-
-    PrivateKeyExt, Signer,
 };
 
-use summit_types::{PublicKey, PrivateKey};
 use commonware_p2p::simulated::{self, Link, Network, Oracle, Receiver, Sender};
 use commonware_runtime::{
-    deterministic::{self, Runner},
     Clock, Metrics, Runner as _, Spawner,
+    deterministic::{self, Runner},
 };
 use commonware_utils::{from_hex_formatted, quorum};
+use summit_types::{PrivateKey, PublicKey};
 //use engine::{engine::Engine, config::EngineConfig};
-use crate::{engine::Engine, config::EngineConfig};
+use crate::test_harness::mock_engine_client::{MockEngineClient, MockEngineNetwork};
+use crate::{config::EngineConfig, engine::Engine};
+use alloy_signer::k256::elliptic_curve::rand_core::OsRng;
+use anyhow::Context;
 use governor::Quota;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU32,
     sync::Arc,
 };
-use std::{time::Duration};
-use alloy_signer::k256::elliptic_curve::rand_core::OsRng;
-use anyhow::Context;
-use crate::test_harness::mock_engine_client::{MockEngineClient, MockEngineNetwork};
 
 async fn link_validators(
     oracle: &mut Oracle<PublicKey>,
@@ -132,13 +136,17 @@ pub fn all_online(n: u32, seed: u64, link: Link, required: u64) -> String {
         link_validators(&mut oracle, &validators, link, None).await;
 
         // Create the engine clients
-        let genesis_hash = from_hex_formatted("0x683713729fcb72be6f3d8b88c8cda3e10569d73b9640d3bf6f5184d94bd97616").expect("failed to decode genesis hash");
-        let genesis_hash: [u8; 32] = genesis_hash.try_into().expect("failed to convert genesis hash");
+        let genesis_hash = from_hex_formatted(
+            "0x683713729fcb72be6f3d8b88c8cda3e10569d73b9640d3bf6f5184d94bd97616",
+        )
+        .expect("failed to decode genesis hash");
+        let genesis_hash: [u8; 32] = genesis_hash
+            .try_into()
+            .expect("failed to convert genesis hash");
         let engine_client_network = MockEngineNetwork::new(genesis_hash);
 
         // Derive threshold
-        let (polynomial, shares) =
-            ops::generate_shares::<_, MinPk>(&mut OsRng, None, n, threshold);
+        let (polynomial, shares) = ops::generate_shares::<_, MinPk>(&mut OsRng, None, n, threshold);
 
         // Create instances
         let mut public_keys = HashSet::new();
@@ -179,7 +187,12 @@ pub fn all_online(n: u32, seed: u64, link: Link, required: u64) -> String {
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                 //indexer: None,
             };
-            let engine = Engine::new(context.with_label(&uid), config, oracle.control(public_key.clone())).await;
+            let engine = Engine::new(
+                context.with_label(&uid),
+                config,
+                oracle.control(public_key.clone()),
+            )
+            .await;
 
             // Get networking
             let (pending, recovered, resolver, broadcast, backfill) =

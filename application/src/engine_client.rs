@@ -30,7 +30,6 @@ use alloy_transport_http::{
 use http_body_util::Full;
 use summit_types::Block;
 
-
 pub trait EngineClient: Clone + Send + Sync + 'static {
     fn start_building_block(
         &self,
@@ -38,13 +37,15 @@ pub trait EngineClient: Clone + Send + Sync + 'static {
         timestamp: u64,
     ) -> impl Future<Output = Option<PayloadId>> + Send;
 
-    fn get_payload(&self, payload_id: PayloadId) -> impl Future<Output = ExecutionPayloadEnvelopeV4> + Send;
+    fn get_payload(
+        &self,
+        payload_id: PayloadId,
+    ) -> impl Future<Output = ExecutionPayloadEnvelopeV4> + Send;
 
     fn check_payload(&self, block: &Block) -> impl Future<Output = PayloadStatus> + Send;
 
     fn commit_hash(&self, fork_choice_state: ForkchoiceState) -> impl Future<Output = ()> + Send;
 }
-
 
 #[derive(Clone)]
 pub struct RethEngineClient {

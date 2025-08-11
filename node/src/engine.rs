@@ -1,3 +1,4 @@
+use crate::config::EngineConfig;
 use commonware_broadcast::buffered;
 use commonware_consensus::marshal;
 use commonware_consensus::threshold_simplex::{self, Engine as Simplex};
@@ -11,12 +12,11 @@ use futures::future::try_join_all;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use summit_application::ApplicationConfig;
+use summit_application::engine_client::EngineClient;
 use summit_application::finalizer::FinalizerMailbox;
 use summit_application::registry::Registry;
 use summit_types::{Block, Digest, PrivateKey, PublicKey};
 use tracing::{error, warn};
-use summit_application::engine_client::EngineClient;
-use crate::config::EngineConfig;
 
 /// To better support peers near tip during network instability, we multiply
 /// the consensus activity timeout by this factor.

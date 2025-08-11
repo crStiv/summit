@@ -49,7 +49,10 @@ fn oneshot_closed_future<T>(sender: &mut oneshot::Sender<T>) -> ChannelClosedFut
     ChannelClosedFuture { sender }
 }
 
-pub struct Actor<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient> {
+pub struct Actor<
+    R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng,
+    C: EngineClient,
+> {
     context: R,
     mailbox: mpsc::Receiver<Message>,
     engine_client: C,
@@ -60,7 +63,9 @@ pub struct Actor<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock
     genesis_hash: [u8; 32],
 }
 
-impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient> Actor<R, C> {
+impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient>
+    Actor<R, C>
+{
     pub async fn new(context: R, cfg: ApplicationConfig<C>) -> (Self, Mailbox, FinalizerMailbox) {
         let (tx, rx) = mpsc::channel(cfg.mailbox_size);
 

@@ -67,7 +67,8 @@ impl<C: EngineClient> EngineConfig<C> {
         genesis: &Genesis,
     ) -> Result<Self> {
         // todo(dalton): clean this mess up
-        let share_path = get_expanded_path(&poly_share_path).context("failed to expand share path")?;
+        let share_path =
+            get_expanded_path(&poly_share_path).context("failed to expand share path")?;
         let share_hex = std::fs::read_to_string(share_path).context("failed to load share hex")?;
 
         let share = from_hex_formatted(&share_hex).expect("invalid format for polynomial share");
