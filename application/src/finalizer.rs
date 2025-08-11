@@ -23,7 +23,10 @@ use crate::engine_client::EngineClient;
 
 const LATEST_KEY: [u8; 1] = [0u8];
 
-pub struct Finalizer<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient> {
+pub struct Finalizer<
+    R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng,
+    C: EngineClient,
+> {
     context: R,
 
     last_indexed: u64,
@@ -39,7 +42,9 @@ pub struct Finalizer<R: Storage + Metrics + Clock + Spawner + governor::clock::C
     rx_finalizer_mailbox: mpsc::Receiver<(Block, oneshot::Sender<()>)>,
 }
 
-impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient> Finalizer<R, C> {
+impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient>
+    Finalizer<R, C>
+{
     pub async fn new(
         context: R,
         engine_client: C,
@@ -107,10 +112,10 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
 
                         // check the payload
                         let payload_status = self.engine_client.check_payload(&block).await;
-
+                        let new_height = block.height;
                         if payload_status.is_valid() {
                             let eth_hash = block.eth_block_hash();
-                            let new_height = block.height;
+
                             info!("Commiting block 0x{} for height {}", hex(&eth_hash), new_height);
 
                             let forkchoice = ForkchoiceState {
@@ -134,15 +139,13 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
 
                             self.engine_client.commit_hash(forkchoice).await;
 
-                            self.last_indexed = new_height;
-
                             *self.forkchoice.lock().expect("poisoned") = forkchoice;
-
-                            self.height_notifier.notify_up_to(new_height);
 
                             info!(new_height, "finalized block");
                         }
 
+                        self.last_indexed = new_height;
+                        self.height_notifier.notify_up_to(new_height);
                         let _ = notifier.send(());
                     },
                 }
