@@ -1,6 +1,8 @@
 use alloy_primitives::Address;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error, FixedSize, Read, Write};
+use commonware_codec::{DecodeExt, Encode, Error, FixedSize, Read, Write};
+
+use crate::PublicKey;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutionRequest {
@@ -82,53 +84,62 @@ impl TryFrom<&[u8]> for WithdrawalRequest {
 // https://eth2book.info/latest/part2/deposits-withdrawals/withdrawal-processing/
 #[derive(Debug, Clone, PartialEq)]
 pub struct DepositRequest {
-    pub pubkey: [u8; 48],                 // Validator BLS public key
-    pub withdrawal_credentials: [u8; 32], // Either hash of the BLS pubkey, or Ethereum address
-    pub amount: u64,                      // Amount in gwei
-    pub signature: [u8; 96],              // BLS signature
-    pub index: u64,                       // Deposit index
+    pub ed25519_pubkey: PublicKey,          // Validator ED25519 public key
+    pub bls_pubkey: [u8; 48],               // Validator BLS public key
+    pub withdrawal_credentials: [u8; 32],   // Either hash of the BLS pubkey, or Ethereum address
+    pub amount: u64,                        // Amount in gwei
+    pub signature: [u8; 96],                // BLS signature
+    pub index: u64,                         // Deposit index
 }
 
 impl TryFrom<&[u8]> for DepositRequest {
     type Error = &'static str;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        // EIP-6110: Deposit request data is exactly 192 bytes (without leading type byte)
-        // Format: pubkey(48) + withdrawal_credentials(32) + amount(8) + signature(96) + index(8) = 192 bytes
+        // EIP-6110: Deposit request data is exactly 224 bytes (without leading type byte)
+        // Format: ed25519_pubkey(32) + bls_pubkey(48) + withdrawal_credentials(32) + amount(8) + signature(96) + index(8) = 224 bytes
 
-        if bytes.len() != 192 {
-            return Err("DepositRequest must be exactly 192 bytes");
+        if bytes.len() != 224 {
+            return Err("DepositRequest must be exactly 224 bytes");
         }
 
-        // Extract pubkey (48 bytes)
-        let pubkey: [u8; 48] = bytes[0..48]
+        // Extract ed25519_pubkey (32 bytes)
+        let ed25519_pubkey_bytes: [u8; 32] = bytes[0..32]
             .try_into()
-            .map_err(|_| "Failed to parse pubkey")?;
+            .map_err(|_| "Failed to parse ed25519_pubkey")?;
+        let ed25519_pubkey = PublicKey::decode(&ed25519_pubkey_bytes[..])
+            .map_err(|_| "Invalid ed25519 public key")?;
+
+        // Extract bls_pubkey (48 bytes)
+        let bls_pubkey: [u8; 48] = bytes[32..80]
+            .try_into()
+            .map_err(|_| "Failed to parse bls_pubkey")?;
 
         // Extract withdrawal_credentials (32 bytes)
-        let withdrawal_credentials: [u8; 32] = bytes[48..80]
+        let withdrawal_credentials: [u8; 32] = bytes[80..112]
             .try_into()
             .map_err(|_| "Failed to parse withdrawal_credentials")?;
 
         // Extract amount (8 bytes, little-endian u64)
-        let amount_bytes: [u8; 8] = bytes[80..88]
+        let amount_bytes: [u8; 8] = bytes[112..120]
             .try_into()
             .map_err(|_| "Failed to parse amount")?;
         let amount = u64::from_le_bytes(amount_bytes);
 
         // Extract signature (96 bytes)
-        let signature: [u8; 96] = bytes[88..184]
+        let signature: [u8; 96] = bytes[120..216]
             .try_into()
             .map_err(|_| "Failed to parse signature")?;
 
         // Extract index (8 bytes, little-endian u64)
-        let index_bytes: [u8; 8] = bytes[184..192]
+        let index_bytes: [u8; 8] = bytes[216..224]
             .try_into()
             .map_err(|_| "Failed to parse index")?;
         let index = u64::from_le_bytes(index_bytes);
 
         Ok(DepositRequest {
-            pubkey,
+            ed25519_pubkey,
+            bls_pubkey,
             withdrawal_credentials,
             amount,
             signature,
@@ -216,7 +227,8 @@ impl Read for WithdrawalRequest {
 
 impl Write for DepositRequest {
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put(&self.pubkey[..]);
+        buf.put(&self.ed25519_pubkey.encode()[..]);
+        buf.put(&self.bls_pubkey[..]);
         buf.put(&self.withdrawal_credentials[..]);
         buf.put(&self.amount.to_le_bytes()[..]);
         buf.put(&self.signature[..]);
@@ -225,19 +237,24 @@ impl Write for DepositRequest {
 }
 
 impl FixedSize for DepositRequest {
-    const SIZE: usize = 192; // 48 + 32 + 8 + 96 + 8
+    const SIZE: usize = 224; // 32 + 48 + 32 + 8 + 96 + 8
 }
 
 impl Read for DepositRequest {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
-        if buf.remaining() < 192 {
+        if buf.remaining() < 224 {
             return Err(Error::Invalid("DepositRequest", "Insufficient bytes"));
         }
 
-        let mut pubkey = [0u8; 48];
-        buf.copy_to_slice(&mut pubkey);
+        let mut ed25519_pubkey_bytes = [0u8; 32];
+        buf.copy_to_slice(&mut ed25519_pubkey_bytes);
+        let ed25519_pubkey = PublicKey::decode(&ed25519_pubkey_bytes[..])
+            .map_err(|_| Error::Invalid("DepositRequest", "Invalid ed25519 public key"))?;
+
+        let mut bls_pubkey = [0u8; 48];
+        buf.copy_to_slice(&mut bls_pubkey);
 
         let mut withdrawal_credentials = [0u8; 32];
         buf.copy_to_slice(&mut withdrawal_credentials);
@@ -254,7 +271,8 @@ impl Read for DepositRequest {
         let index = u64::from_le_bytes(index_bytes);
 
         Ok(DepositRequest {
-            pubkey,
+            ed25519_pubkey,
+            bls_pubkey,
             withdrawal_credentials,
             amount,
             signature,
@@ -272,17 +290,18 @@ mod tests {
     #[test]
     fn test_deposit_request_codec() {
         let deposit = DepositRequest {
-            pubkey: [1u8; 48],
-            withdrawal_credentials: [2u8; 32],
+            ed25519_pubkey: PublicKey::decode(&[1u8; 32][..]).unwrap(),
+            bls_pubkey: [2u8; 48],
+            withdrawal_credentials: [3u8; 32],
             amount: 32000000000u64, // 32 ETH in gwei
-            signature: [3u8; 96],
+            signature: [4u8; 96],
             index: 42u64,
         };
 
         // Test Write
         let mut buf = BytesMut::new();
         deposit.write(&mut buf);
-        assert_eq!(buf.len(), 192); // 48 + 32 + 8 + 96 + 8
+        assert_eq!(buf.len(), 224); // 32 + 48 + 32 + 8 + 96 + 8
 
         // Test Read
         let decoded = DepositRequest::read(&mut buf.as_ref()).unwrap();
@@ -310,10 +329,11 @@ mod tests {
     #[test]
     fn test_execution_request_deposit_codec() {
         let deposit = DepositRequest {
-            pubkey: [6u8; 48],
-            withdrawal_credentials: [7u8; 32],
+            ed25519_pubkey: PublicKey::decode(&[6u8; 32][..]).unwrap(),
+            bls_pubkey: [7u8; 48],
+            withdrawal_credentials: [8u8; 32],
             amount: 32000000000u64,
-            signature: [8u8; 96],
+            signature: [9u8; 96],
             index: 123u64,
         };
         let exec_request = ExecutionRequest::Deposit(deposit.clone());
@@ -321,7 +341,7 @@ mod tests {
         // Test Write
         let mut buf = BytesMut::new();
         exec_request.write(&mut buf);
-        assert_eq!(buf.len(), 193); // 1 (type) + 192 (deposit)
+        assert_eq!(buf.len(), 225); // 1 (type) + 224 (deposit)
         assert_eq!(buf[0], 0x00); // Deposit type byte
 
         // Test Read
@@ -377,7 +397,7 @@ mod tests {
 
     #[test]
     fn test_execution_request_empty_buffer() {
-        let mut buf = BytesMut::new();
+        let buf = BytesMut::new();
         let result = ExecutionRequest::read(&mut buf.as_ref());
         assert!(result.is_err());
         if let Err(Error::Invalid(type_name, msg)) = result {
@@ -391,7 +411,7 @@ mod tests {
     #[test]
     fn test_deposit_request_insufficient_bytes() {
         let mut buf = BytesMut::new();
-        buf.put(&[0u8; 191][..]); // One byte short
+        buf.put(&[0u8; 223][..]); // One byte short
 
         let result = DepositRequest::read(&mut buf.as_ref());
         assert!(result.is_err());
@@ -422,10 +442,11 @@ mod tests {
     fn test_roundtrip_compatibility_with_try_from() {
         // Test that our Codec implementation is compatible with existing TryFrom<&[u8]>
         let deposit = DepositRequest {
-            pubkey: [11u8; 48],
-            withdrawal_credentials: [12u8; 32],
+            ed25519_pubkey: PublicKey::decode(&[11u8; 32][..]).unwrap(),
+            bls_pubkey: [12u8; 48],
+            withdrawal_credentials: [13u8; 32],
             amount: 64000000000u64,
-            signature: [13u8; 96],
+            signature: [14u8; 96],
             index: 999u64,
         };
         let exec_request = ExecutionRequest::Deposit(deposit);
