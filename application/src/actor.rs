@@ -77,6 +77,8 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             cfg.engine_client.clone(),
             forkchoice.clone(),
             cfg.partition_prefix,
+            cfg.validator_onboarding_interval,
+            cfg.validator_onboarding_limit_per_block,
         )
         .await;
 

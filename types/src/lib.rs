@@ -1,6 +1,6 @@
 mod block;
-pub mod genesis;
 pub mod execution_request;
+pub mod genesis;
 
 pub use block::*;
 use commonware_cryptography::bls12381::primitives::variant::{MinPk, Variant};

@@ -35,6 +35,11 @@ const FREEZER_JOURNAL_COMPRESSION: Option<u8> = Some(3);
 const MAX_REPAIR: u64 = 20;
 //
 
+// Onboarding config (set arbitrarily for now)
+const VALIDATOR_ONBOARDING_INTERVAL: u64 = 10;
+const VALIDATOR_ONBOARDING_LIMIT_PER_BLOCK: usize = 3;
+//
+
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     B: Blocker<PublicKey = PublicKey>,
@@ -79,6 +84,8 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 partition_prefix: cfg.partition_prefix.clone(),
                 genesis_hash: cfg.genesis_hash,
+                validator_onboarding_interval: VALIDATOR_ONBOARDING_INTERVAL,
+                validator_onboarding_limit_per_block: VALIDATOR_ONBOARDING_LIMIT_PER_BLOCK,
             },
         )
         .await;

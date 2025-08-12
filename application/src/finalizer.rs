@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::engine_client::EngineClient;
 use alloy_rpc_types_engine::ForkchoiceState;
 use commonware_consensus::Reporter;
 use commonware_macros::select;
@@ -17,11 +18,12 @@ use futures::{
 use metrics::{counter, histogram};
 use rand::Rng;
 use summit_types::Block;
+use summit_types::execution_request::{DepositRequest, ExecutionRequest, WithdrawalRequest};
+use summit_utils::persistent_queue::{Config as PersistentQueueConfig, PersistentQueue};
 use tracing::{info, warn};
-use summit_types::execution_request::ExecutionRequest;
-use crate::engine_client::EngineClient;
 
 const LATEST_KEY: [u8; 1] = [0u8];
+const DEPOSIT_REQUESTS_KEY: [u8; 1] = [0u8];
 
 pub struct Finalizer<
     R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng,
@@ -41,7 +43,13 @@ pub struct Finalizer<
 
     rx_finalizer_mailbox: mpsc::Receiver<(Block, oneshot::Sender<()>)>,
 
-    execution_requests: Vec<ExecutionRequest>,
+    deposit_queue: PersistentQueue<R, DepositRequest>,
+
+    withdrawal_queue: PersistentQueue<R, WithdrawalRequest>,
+
+    validator_onboarding_interval: u64,
+
+    validator_onboarding_limit_per_block: usize,
 }
 
 impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient>
@@ -52,23 +60,32 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         engine_client: C,
         forkchoice: Arc<Mutex<ForkchoiceState>>,
         db_prefix: String,
+        validator_onboarding_interval: u64,
+        validator_onboarding_limit_per_block: usize,
     ) -> (
         Self,
         FinalizerMailbox,
         mpsc::Sender<(u64, oneshot::Sender<()>)>,
     ) {
-        // Initialize finalizer metadata
-        let metadata: Metadata<R, FixedBytes<1>, u64> = Metadata::init(
-            context.with_label("finalizer_metadata"),
-            metadata::Config {
-                partition: format!("{}-finalizer_metadata", db_prefix),
-                codec_config: (),
-            },
+        let deposit_queue_cfg = PersistentQueueConfig {
+            partition: format!("{db_prefix}-finalizer_deposit_queue"),
+            codec_config: (),
+        };
+        let deposit_queue = PersistentQueue::<R, DepositRequest>::new(
+            context.with_label("finalizer_deposit_queue"),
+            deposit_queue_cfg,
         )
-        .await
-        .expect("Failed to initialize finalizer metadata");
+        .await;
 
-        let last_indexed = *metadata.get(&FixedBytes::new(LATEST_KEY)).unwrap_or(&0);
+        let withdrawal_queue_cfg = PersistentQueueConfig {
+            partition: format!("{db_prefix}-finalizer_deposit_queue"),
+            codec_config: (),
+        };
+        let withdrawal_queue = PersistentQueue::<R, WithdrawalRequest>::new(
+            context.with_label("finalizer_deposit_queue"),
+            withdrawal_queue_cfg,
+        )
+        .await;
 
         let (tx_height_notify, height_notify_mailbox) = mpsc::channel(1000);
 
@@ -77,13 +94,16 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         (
             Self {
                 context,
-                last_indexed,
+                last_indexed: 0,
                 height_notifier: HeightNotifier::new(),
                 height_notify_mailbox,
                 engine_client,
                 forkchoice,
                 rx_finalizer_mailbox,
-                execution_requests: Vec::new(),
+                deposit_queue,
+                withdrawal_queue,
+                validator_onboarding_interval,
+                validator_onboarding_limit_per_block,
             },
             FinalizerMailbox::new(tx_finalizer),
             tx_height_notify,
@@ -144,17 +164,36 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
 
                             *self.forkchoice.lock().expect("poisoned") = forkchoice;
 
+                            // Parse execution requests
                             for request_bytes in block.execution_requests {
                                 match ExecutionRequest::try_from(request_bytes.as_ref()) {
                                     Ok(execution_request) => {
-                                        self.execution_requests.push(execution_request);
+                                        match execution_request {
+                                            ExecutionRequest::Deposit(deposit_request) => {
+                                                self.deposit_queue.push(deposit_request);
+                                            }
+                                            ExecutionRequest::Withdrawal(withdrawal_request) => {
+                                                self.withdrawal_queue.push(withdrawal_request);
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         warn!("Failed to parse execution request: {}", e);
                                     }
                                 }
-
                             }
+
+                            // Add validators that deposited to the validator set
+                            // TODO(matthias): I think `last_indexed` isn't necessary incremented by 1
+                            if self.last_indexed % self.validator_onboarding_interval == 0 {
+                                for _ in 0..self.validator_onboarding_limit_per_block {
+                                    if let Some(request) = self.deposit_queue.pop() {
+                                        // TODO(matthias): add validators
+                                    }
+
+                                }
+                            }
+
                             info!(new_height, "finalized block");
                         }
 
