@@ -1,5 +1,5 @@
-use crate::engine_client::EngineClient;
 use crate::Registry;
+use crate::engine_client::EngineClient;
 
 #[derive(Clone)]
 pub struct ApplicationConfig<C: EngineClient> {

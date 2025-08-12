@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 summit-types.workspace = true
+summit-utils.workspace = true
 
 anyhow.workspace = true
 tracing.workspace = true

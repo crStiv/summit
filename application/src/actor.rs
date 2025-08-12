@@ -1,4 +1,9 @@
-use crate::{ApplicationConfig, engine_client::EngineClient, finalizer::{Finalizer, FinalizerMailbox}, ingress::{Mailbox, Message}, Registry};
+use crate::{
+    ApplicationConfig, Registry,
+    engine_client::EngineClient,
+    finalizer::{Finalizer, FinalizerMailbox},
+    ingress::{Mailbox, Message},
+};
 use alloy_rpc_types_engine::ForkchoiceState;
 use anyhow::{Result, anyhow};
 use commonware_consensus::marshal;
