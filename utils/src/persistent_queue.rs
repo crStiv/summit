@@ -328,7 +328,7 @@ mod tests {
             // Queue should remain unchanged
             assert!(!queue.is_empty());
             assert_eq!(queue.len(), 1);
-            
+
             // Multiple peeks should return same value
             assert_eq!(queue.peek(), Some(&42));
             assert_eq!(queue.peek(), Some(&42));
@@ -350,7 +350,7 @@ mod tests {
             // Peek should return first item (FIFO)
             assert_eq!(queue.peek(), Some(&1));
             assert_eq!(queue.len(), 3);
-            
+
             // Multiple peeks should return same value
             assert_eq!(queue.peek(), Some(&1));
             assert_eq!(queue.peek(), Some(&1));
@@ -363,7 +363,8 @@ mod tests {
         let cfg = commonware_runtime::deterministic::Config::default().with_seed(10);
         let executor = Runner::from(cfg);
         executor.start(|context| async move {
-            let mut queue = create_test_queue_with_context("test_peek_pop_consistency", context).await;
+            let mut queue =
+                create_test_queue_with_context("test_peek_pop_consistency", context).await;
 
             queue.push(100);
             queue.push(200);
@@ -371,11 +372,11 @@ mod tests {
             // Peek and pop should return same value
             assert_eq!(queue.peek(), Some(&100));
             assert_eq!(queue.pop(), Some(100));
-            
+
             // Next peek should return next item
             assert_eq!(queue.peek(), Some(&200));
             assert_eq!(queue.pop(), Some(200));
-            
+
             // Queue should be empty
             assert_eq!(queue.peek(), None);
             assert_eq!(queue.pop(), None);

@@ -84,12 +84,12 @@ impl TryFrom<&[u8]> for WithdrawalRequest {
 // https://eth2book.info/latest/part2/deposits-withdrawals/withdrawal-processing/
 #[derive(Debug, Clone, PartialEq)]
 pub struct DepositRequest {
-    pub ed25519_pubkey: PublicKey,          // Validator ED25519 public key
-    pub bls_pubkey: [u8; 48],               // Validator BLS public key
-    pub withdrawal_credentials: [u8; 32],   // Either hash of the BLS pubkey, or Ethereum address
-    pub amount: u64,                        // Amount in gwei
-    pub signature: [u8; 96],                // BLS signature
-    pub index: u64,                         // Deposit index
+    pub ed25519_pubkey: PublicKey,        // Validator ED25519 public key
+    pub bls_pubkey: [u8; 48],             // Validator BLS public key
+    pub withdrawal_credentials: [u8; 32], // Either hash of the BLS pubkey, or Ethereum address
+    pub amount: u64,                      // Amount in gwei
+    pub signature: [u8; 96],              // BLS signature
+    pub index: u64,                       // Deposit index
 }
 
 impl TryFrom<&[u8]> for DepositRequest {

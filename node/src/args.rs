@@ -210,7 +210,9 @@ impl Command {
                 authenticated::discovery::Network::new(context.with_label("network"), p2p_cfg);
 
             // Provide authorized peers
-            oracle.register(0, committee.into_iter().map(|(key, _)| key).collect()).await;
+            oracle
+                .register(0, committee.into_iter().map(|(key, _)| key).collect())
+                .await;
 
             // Register pending channel
             let pending_limit = Quota::per_second(NonZeroU32::new(128).unwrap());

@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::Registry;
 use crate::engine_client::EngineClient;
 use alloy_rpc_types_engine::ForkchoiceState;
 use commonware_consensus::Reporter;
@@ -21,18 +22,14 @@ use summit_types::Block;
 use summit_types::execution_request::{DepositRequest, ExecutionRequest, WithdrawalRequest};
 use summit_utils::persistent_queue::{Config as PersistentQueueConfig, PersistentQueue};
 use tracing::{info, warn};
-use crate::Registry;
 
 const LATEST_KEY: [u8; 1] = [0u8];
-const DEPOSIT_REQUESTS_KEY: [u8; 1] = [0u8];
 
 pub struct Finalizer<
     R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng,
     C: EngineClient,
 > {
     context: R,
-
-    last_indexed: u64,
 
     height_notifier: HeightNotifier,
 
@@ -51,6 +48,8 @@ pub struct Finalizer<
     withdrawal_queue: PersistentQueue<R, WithdrawalRequest>,
 
     accounts: Metadata<R, FixedBytes<48>, DepositRequest>,
+
+    state_variables: Metadata<R, FixedBytes<1>, u64>,
 
     validator_onboarding_interval: u64,
 
@@ -101,7 +100,17 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             },
         )
         .await
-        .expect("failed to initialize accounts metadata");
+        .expect("failed to initialize account metadata");
+
+        let state_variables: Metadata<R, FixedBytes<1>, u64> = Metadata::init(
+            context.with_label("finalizer_state"),
+            Config {
+                partition: format!("{db_prefix}-finalizer_state"),
+                codec_config: (),
+            },
+        )
+        .await
+        .expect("failed to initialize state variables metadata");
 
         let (tx_height_notify, height_notify_mailbox) = mpsc::channel(1000);
 
@@ -110,7 +119,6 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         (
             Self {
                 context,
-                last_indexed: 0,
                 height_notifier: HeightNotifier::new(),
                 height_notify_mailbox,
                 engine_client,
@@ -120,6 +128,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 deposit_queue,
                 withdrawal_queue,
                 accounts,
+                state_variables,
                 validator_onboarding_interval,
                 validator_onboarding_limit_per_block,
             },
@@ -137,7 +146,8 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                     mail = self.height_notify_mailbox.next() => {
                         let (height, sender) = mail.expect("height notify mailbox dropped");
 
-                        if self.last_indexed >= height {
+                        let last_indexed = *self.state_variables.get(&FixedBytes::new(LATEST_KEY)).unwrap_or(&0);
+                        if last_indexed >= height {
                             let _ = sender.send(());
                             continue;
                         }
@@ -203,7 +213,8 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
 
                             // Add validators that deposited to the validator set
                             // TODO(matthias): I think `last_indexed` isn't necessary incremented by 1
-                            if self.last_indexed % self.validator_onboarding_interval == 0 {
+                            let last_indexed = *self.state_variables.get(&FixedBytes::new(LATEST_KEY)).unwrap_or(&0);
+                            if last_indexed % self.validator_onboarding_interval == 0 {
                                 for _ in 0..self.validator_onboarding_limit_per_block {
                                     if let Some(request) = self.deposit_queue.peek() {
                                         if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone()) {
@@ -235,7 +246,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                             info!(new_height, "finalized block");
                         }
 
-                        self.last_indexed = new_height;
+                        self.state_variables.put(FixedBytes::new(LATEST_KEY), new_height);
                         self.height_notifier.notify_up_to(new_height);
                         let _ = notifier.send(());
                     },
