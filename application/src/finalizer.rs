@@ -205,16 +205,25 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                             // TODO(matthias): I think `last_indexed` isn't necessary incremented by 1
                             if self.last_indexed % self.validator_onboarding_interval == 0 {
                                 for _ in 0..self.validator_onboarding_limit_per_block {
-                                    if let Some(request) = self.deposit_queue.pop() {
+                                    if let Some(request) = self.deposit_queue.peek() {
                                         if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone()) {
                                             // This only happens if the key already exists
                                             warn!("Failed to add validator: {}", e);
                                         }
                                         if let Some(account) = self.accounts.get_mut(&FixedBytes::new(request.bls_pubkey.clone())) {
-                                            account.amount += request.amount;
+                                            // Since we only remove the request from the queue after processing it,
+                                            // it can happen that the binary crashes, and then we will process the same request twice.
+                                            // If the index matches, we are processing the same request that we already processed. In that
+                                            // case we won't increment the balance.
+                                            if request.index > account.index {
+                                                account.amount += request.amount;
+                                            }
                                         } else {
-                                            self.accounts.put(FixedBytes::new(request.bls_pubkey), request);
+                                            self.accounts.put(FixedBytes::new(request.bls_pubkey), request.clone());
                                         }
+
+                                        // Only remove the request from the queue after we processed and stored it
+                                        let _ = self.deposit_queue.pop();
                                     }
 
                                 }
