@@ -8,7 +8,7 @@ use alloy_rpc_types_engine::ForkchoiceState;
 use commonware_consensus::Reporter;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
-use commonware_storage::metadata::{self, Metadata};
+use commonware_storage::metadata::{self, Config, Metadata};
 use commonware_utils::{hex, sequence::FixedBytes};
 use futures::{
     SinkExt as _, StreamExt,
@@ -49,6 +49,8 @@ pub struct Finalizer<
     deposit_queue: PersistentQueue<R, DepositRequest>,
 
     withdrawal_queue: PersistentQueue<R, WithdrawalRequest>,
+
+    accounts: Metadata<R, FixedBytes<48>, DepositRequest>,
 
     validator_onboarding_interval: u64,
 
@@ -91,6 +93,16 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         )
         .await;
 
+        let accounts: Metadata<R, FixedBytes<48>, DepositRequest> = Metadata::init(
+            context.with_label("finalizer_accounts"),
+            Config {
+                partition: format!("{db_prefix}-finalizer_accounts"),
+                codec_config: (),
+            },
+        )
+        .await
+        .expect("failed to initialize accounts metadata");
+
         let (tx_height_notify, height_notify_mailbox) = mpsc::channel(1000);
 
         let (tx_finalizer, rx_finalizer_mailbox) = mpsc::channel(1); // todo(dalton) there should only ever be one message in this channel since we block but lets verify this
@@ -107,6 +119,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 rx_finalizer_mailbox,
                 deposit_queue,
                 withdrawal_queue,
+                accounts,
                 validator_onboarding_interval,
                 validator_onboarding_limit_per_block,
             },
@@ -193,17 +206,22 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                             if self.last_indexed % self.validator_onboarding_interval == 0 {
                                 for _ in 0..self.validator_onboarding_limit_per_block {
                                     if let Some(request) = self.deposit_queue.pop() {
-                                        // TODO(matthias): add validators
-                                        if let Err(e) = self.registry.add_participant(request.ed25519_pubkey) {
+                                        if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone()) {
                                             // This only happens if the key already exists
                                             warn!("Failed to add validator: {}", e);
+                                        }
+                                        if let Some(account) = self.accounts.get_mut(&FixedBytes::new(request.bls_pubkey.clone())) {
+                                            account.amount += request.amount;
                                         } else {
-                                            // TODO(matthias): accounting to keep track of deposits
+                                            self.accounts.put(FixedBytes::new(request.bls_pubkey), request);
                                         }
                                     }
 
                                 }
                             }
+
+                            // TODO(matthias): verify what happens if the binary shuts down before storing the deposits to disk.
+                            // I think it should be okay, because we only set `last_indexed` after writing to disk.
 
                             info!(new_height, "finalized block");
                         }
