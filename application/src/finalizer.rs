@@ -21,6 +21,7 @@ use summit_types::Block;
 use summit_types::execution_request::{DepositRequest, ExecutionRequest, WithdrawalRequest};
 use summit_utils::persistent_queue::{Config as PersistentQueueConfig, PersistentQueue};
 use tracing::{info, warn};
+use crate::Registry;
 
 const LATEST_KEY: [u8; 1] = [0u8];
 const DEPOSIT_REQUESTS_KEY: [u8; 1] = [0u8];
@@ -38,6 +39,8 @@ pub struct Finalizer<
     height_notify_mailbox: mpsc::Receiver<(u64, oneshot::Sender<()>)>,
 
     engine_client: C,
+
+    registry: Registry,
 
     forkchoice: Arc<Mutex<ForkchoiceState>>,
 
@@ -58,6 +61,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
     pub async fn new(
         context: R,
         engine_client: C,
+        registry: Registry,
         forkchoice: Arc<Mutex<ForkchoiceState>>,
         db_prefix: String,
         validator_onboarding_interval: u64,
@@ -98,6 +102,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 height_notifier: HeightNotifier::new(),
                 height_notify_mailbox,
                 engine_client,
+                registry,
                 forkchoice,
                 rx_finalizer_mailbox,
                 deposit_queue,
@@ -189,6 +194,12 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                 for _ in 0..self.validator_onboarding_limit_per_block {
                                     if let Some(request) = self.deposit_queue.pop() {
                                         // TODO(matthias): add validators
+                                        if let Err(e) = self.registry.add_participant(request.ed25519_pubkey) {
+                                            // This only happens if the key already exists
+                                            warn!("Failed to add validator: {}", e);
+                                        } else {
+                                            // TODO(matthias): accounting to keep track of deposits
+                                        }
                                     }
 
                                 }

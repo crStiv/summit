@@ -54,7 +54,6 @@ pub struct Actor<
     C: EngineClient,
 > {
     context: R,
-    registry: Registry,
     mailbox: mpsc::Receiver<Message>,
     engine_client: C,
     forkchoice: Arc<Mutex<ForkchoiceState>>,
@@ -80,6 +79,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         let (finalizer, finalizer_mailbox, tx_height_notify) = Finalizer::new(
             context.with_label("finalizer"),
             cfg.engine_client.clone(),
+            cfg.registry,
             forkchoice.clone(),
             cfg.partition_prefix,
             cfg.validator_onboarding_interval,
@@ -90,7 +90,6 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         (
             Self {
                 context,
-                registry: cfg.registry,
                 mailbox: rx,
                 engine_client: cfg.engine_client,
                 forkchoice,
