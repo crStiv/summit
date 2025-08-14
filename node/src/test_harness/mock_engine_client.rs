@@ -72,12 +72,14 @@ impl MockEngineClient {
         chain
     }
 
+    #[allow(unused)]
     /// Check if a block exists in canonical chain
     pub fn has_block(&self, block_hash: FixedBytes<32>) -> bool {
         let state = self.state.lock().unwrap();
         state.canonical_blocks.contains_key(&block_hash)
     }
 
+    #[allow(unused)]
     /// Add a block to canonical chain (for testing consensus)
     pub fn add_canonical_block(&self, block: ExecutionPayloadV3) -> bool {
         let mut state = self.state.lock().unwrap();
@@ -106,12 +108,14 @@ impl MockEngineClient {
         true
     }
 
+    #[allow(unused)]
     // Test configuration methods
     pub fn set_force_invalid(&self, force: bool) {
         let mut state = self.state.lock().unwrap();
         state.force_invalid = force;
     }
 
+    #[allow(unused)]
     pub fn set_should_fail(&self, should_fail: bool) {
         let mut state = self.state.lock().unwrap();
         state.should_fail = should_fail;
@@ -413,9 +417,20 @@ impl MockEngineNetwork {
         let reference_chain = clients[0].get_canonical_chain();
         let reference_height = clients[0].get_chain_height();
 
+        println!("reference_chain");
+        println!("{reference_chain:?}");
+        println!("reference_chain");
+        println!("{reference_chain:?}");
+
         for client in clients.iter().skip(1) {
             let client_chain = client.get_canonical_chain();
             let client_height = client.get_chain_height();
+
+
+            println!("client_chain");
+            println!("{client_chain:?}");
+            println!("client_height");
+            println!("{client_height:?}");
 
             if client_height != reference_height {
                 return Err(format!(

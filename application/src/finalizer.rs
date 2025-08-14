@@ -55,7 +55,7 @@ pub struct Finalizer<
 
     validator_onboarding_limit_per_block: usize,
 
-    validator_minimum_stake: u64 // in gwei
+    validator_minimum_stake: u64, // in gwei
 }
 
 impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient>
@@ -237,7 +237,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             validator_balance += request.amount;
                                         }
                                         if validator_balance > self.validator_minimum_stake {
-                                            if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone()) {
+                                            if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone(), last_indexed) {
                                                 // This only happens if the key already exists
                                                 warn!("Failed to add validator: {}", e);
                                             }

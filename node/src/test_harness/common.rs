@@ -1,13 +1,9 @@
-//use alto_types::{Finalized, Notarized};
 use commonware_cryptography::{
-    //ed25519::{PublicKey, PrivateKey},
     PrivateKeyExt,
     Signer,
     bls12381::{
         dkg::ops,
         primitives::{
-            group::{self, Share},
-            poly::{self, Poly},
             variant::MinPk,
         },
     },
@@ -15,23 +11,19 @@ use commonware_cryptography::{
 
 use commonware_p2p::simulated::{self, Link, Network, Oracle, Receiver, Sender};
 use commonware_runtime::{
-    Clock, Metrics, Runner as _, Spawner,
+    Clock, Metrics, Runner as _,
     deterministic::{self, Runner},
 };
 use commonware_utils::{from_hex_formatted, quorum};
 use summit_types::{PrivateKey, PublicKey};
-//use engine::{engine::Engine, config::EngineConfig};
-use crate::test_harness::mock_engine_client::{MockEngineClient, MockEngineNetwork};
+use crate::test_harness::mock_engine_client::MockEngineNetwork;
 use crate::{config::EngineConfig, engine::Engine};
 use alloy_signer::k256::elliptic_curve::rand_core::OsRng;
-use anyhow::Context;
 use governor::Quota;
-use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU32,
-    sync::Arc,
 };
 
 async fn link_validators(
@@ -107,7 +99,7 @@ pub fn all_online(n: u32, seed: u64, link: Link, required: u64, verify_consensus
     let threshold = quorum(n);
     let cfg = deterministic::Config::default().with_seed(seed);
     let executor = Runner::from(cfg);
-    executor.start(|mut context| async move {
+    executor.start(|context| async move {
         // Create simulated network
         let (network, mut oracle) = Network::new(
             context.with_label("network"),
@@ -226,10 +218,9 @@ pub fn all_online(n: u32, seed: u64, link: Link, required: u64, verify_consensus
                     assert_eq!(value, 0);
                 }
 
-
                 // If ends with contiguous_height, ensure it is at least required_container
                 if metric.ends_with("_marshal_processed_height") {
-                   // if metric.ends_with("_simplex_voter_journal_synced_total") {
+                    // if metric.ends_with("_simplex_voter_journal_synced_total") {
                     let value = value.parse::<u64>().unwrap();
                     if value >= required {
                         num_nodes_finished += 1;
