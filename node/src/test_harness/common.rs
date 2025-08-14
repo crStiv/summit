@@ -94,7 +94,7 @@ async fn register_validators(
     registrations
 }
 
-pub fn all_online(n: u32, seed: u64, link: Link, required: u64, verify_consensus: bool) -> String {
+pub fn all_online(n: u32, seed: u64, link: Link, run_until_height: u64, verify_consensus: bool) -> String {
     // Create context
     let threshold = quorum(n);
     let cfg = deterministic::Config::default().with_seed(seed);
@@ -220,9 +220,8 @@ pub fn all_online(n: u32, seed: u64, link: Link, required: u64, verify_consensus
 
                 // If ends with contiguous_height, ensure it is at least required_container
                 if metric.ends_with("_marshal_processed_height") {
-                    // if metric.ends_with("_simplex_voter_journal_synced_total") {
                     let value = value.parse::<u64>().unwrap();
-                    if value >= required {
+                    if value >= run_until_height {
                         num_nodes_finished += 1;
                         if num_nodes_finished == n {
                             success = true;
@@ -240,7 +239,7 @@ pub fn all_online(n: u32, seed: u64, link: Link, required: u64, verify_consensus
         }
 
         if verify_consensus {
-            assert!(engine_client_network.verify_consensus().is_ok());
+            assert!(engine_client_network.verify_consensus(Some(run_until_height)).is_ok());
         }
 
         context.auditor().state()
