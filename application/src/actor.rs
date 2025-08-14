@@ -79,8 +79,12 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         let (finalizer, finalizer_mailbox, tx_height_notify) = Finalizer::new(
             context.with_label("finalizer"),
             cfg.engine_client.clone(),
+            cfg.registry,
             forkchoice.clone(),
             cfg.partition_prefix,
+            cfg.validator_onboarding_interval,
+            cfg.validator_onboarding_limit_per_block,
+            cfg.validator_minimum_stake,
         )
         .await;
 

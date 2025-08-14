@@ -4972,6 +4972,7 @@ dependencies = [
  "metrics",
  "rand 0.8.5",
  "summit-types",
+ "summit-utils",
  "tower",
  "tracing",
 ]
@@ -4993,6 +4994,18 @@ dependencies = [
  "ethereum_ssz_derive",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "summit-utils"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "tokio",
 ]
 
 [[package]]

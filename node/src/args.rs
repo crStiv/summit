@@ -7,7 +7,6 @@ use crate::{
     keys::KeySubCmd,
     utils::get_expanded_path,
 };
-use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use commonware_cryptography::Signer;
 use commonware_p2p::authenticated;
@@ -195,21 +194,24 @@ impl Command {
 
             // configure network
 
-            let mut p2p_cfg = authenticated::lookup::Config::aggressive(
+            let mut p2p_cfg = authenticated::discovery::Config::aggressive(
                 config.signer.clone(),
                 genesis.namespace.as_bytes(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), flags.port),
                 our_ip,
+                committee.clone(),
                 genesis.max_message_size_bytes as usize,
             );
             p2p_cfg.mailbox_size = config.mailbox_size;
 
             // Start p2p
             let (mut network, mut oracle) =
-                authenticated::lookup::Network::new(context.with_label("network"), p2p_cfg);
+                authenticated::discovery::Network::new(context.with_label("network"), p2p_cfg);
 
             // Provide authorized peers
-            oracle.register(0, committee).await;
+            oracle
+                .register(0, committee.into_iter().map(|(key, _)| key).collect())
+                .await;
 
             // Register pending channel
             let pending_limit = Quota::per_second(NonZeroU32::new(128).unwrap());

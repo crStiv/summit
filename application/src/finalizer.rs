@@ -3,11 +3,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::Registry;
+use crate::engine_client::EngineClient;
 use alloy_rpc_types_engine::ForkchoiceState;
 use commonware_consensus::Reporter;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
-use commonware_storage::metadata::{self, Metadata};
+use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::{hex, sequence::FixedBytes};
 use futures::{
     SinkExt as _, StreamExt,
@@ -17,9 +19,9 @@ use futures::{
 use metrics::{counter, histogram};
 use rand::Rng;
 use summit_types::Block;
+use summit_types::execution_request::{DepositRequest, ExecutionRequest, WithdrawalRequest};
+use summit_utils::persistent_queue::{Config as PersistentQueueConfig, PersistentQueue};
 use tracing::{info, warn};
-
-use crate::engine_client::EngineClient;
 
 const LATEST_KEY: [u8; 1] = [0u8];
 
@@ -29,44 +31,90 @@ pub struct Finalizer<
 > {
     context: R,
 
-    last_indexed: u64,
-
     height_notifier: HeightNotifier,
 
     height_notify_mailbox: mpsc::Receiver<(u64, oneshot::Sender<()>)>,
 
     engine_client: C,
 
+    registry: Registry,
+
     forkchoice: Arc<Mutex<ForkchoiceState>>,
 
     rx_finalizer_mailbox: mpsc::Receiver<(Block, oneshot::Sender<()>)>,
+
+    deposit_queue: PersistentQueue<R, DepositRequest>,
+
+    withdrawal_queue: PersistentQueue<R, WithdrawalRequest>,
+
+    accounts: Metadata<R, FixedBytes<48>, DepositRequest>,
+
+    state_variables: Metadata<R, FixedBytes<1>, u64>,
+
+    validator_onboarding_interval: u64,
+
+    validator_onboarding_limit_per_block: usize,
+
+    validator_minimum_stake: u64 // in gwei
 }
 
 impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient>
     Finalizer<R, C>
 {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         context: R,
         engine_client: C,
+        registry: Registry,
         forkchoice: Arc<Mutex<ForkchoiceState>>,
         db_prefix: String,
+        validator_onboarding_interval: u64,
+        validator_onboarding_limit_per_block: usize,
+        validator_minimum_stake: u64,
     ) -> (
         Self,
         FinalizerMailbox,
         mpsc::Sender<(u64, oneshot::Sender<()>)>,
     ) {
-        // Initialize finalizer metadata
-        let metadata: Metadata<R, FixedBytes<1>, u64> = Metadata::init(
-            context.with_label("finalizer_metadata"),
-            metadata::Config {
-                partition: format!("{}-finalizer_metadata", db_prefix),
+        let deposit_queue_cfg = PersistentQueueConfig {
+            partition: format!("{db_prefix}-finalizer_deposit_queue"),
+            codec_config: (),
+        };
+        let deposit_queue = PersistentQueue::<R, DepositRequest>::new(
+            context.with_label("finalizer_deposit_queue"),
+            deposit_queue_cfg,
+        )
+        .await;
+
+        let withdrawal_queue_cfg = PersistentQueueConfig {
+            partition: format!("{db_prefix}-finalizer_deposit_queue"),
+            codec_config: (),
+        };
+        let withdrawal_queue = PersistentQueue::<R, WithdrawalRequest>::new(
+            context.with_label("finalizer_deposit_queue"),
+            withdrawal_queue_cfg,
+        )
+        .await;
+
+        let accounts: Metadata<R, FixedBytes<48>, DepositRequest> = Metadata::init(
+            context.with_label("finalizer_accounts"),
+            Config {
+                partition: format!("{db_prefix}-finalizer_accounts"),
                 codec_config: (),
             },
         )
         .await
-        .expect("Failed to initialize finalizer metadata");
+        .expect("failed to initialize account metadata");
 
-        let last_indexed = *metadata.get(&FixedBytes::new(LATEST_KEY)).unwrap_or(&0);
+        let state_variables: Metadata<R, FixedBytes<1>, u64> = Metadata::init(
+            context.with_label("finalizer_state"),
+            Config {
+                partition: format!("{db_prefix}-finalizer_state"),
+                codec_config: (),
+            },
+        )
+        .await
+        .expect("failed to initialize state variables metadata");
 
         let (tx_height_notify, height_notify_mailbox) = mpsc::channel(1000);
 
@@ -75,12 +123,19 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         (
             Self {
                 context,
-                last_indexed,
                 height_notifier: HeightNotifier::new(),
                 height_notify_mailbox,
                 engine_client,
+                registry,
                 forkchoice,
                 rx_finalizer_mailbox,
+                deposit_queue,
+                withdrawal_queue,
+                accounts,
+                state_variables,
+                validator_onboarding_interval,
+                validator_onboarding_limit_per_block,
+                validator_minimum_stake,
             },
             FinalizerMailbox::new(tx_finalizer),
             tx_height_notify,
@@ -96,7 +151,8 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                     mail = self.height_notify_mailbox.next() => {
                         let (height, sender) = mail.expect("height notify mailbox dropped");
 
-                        if self.last_indexed >= height {
+                        let last_indexed = *self.state_variables.get(&FixedBytes::new(LATEST_KEY)).unwrap_or(&0);
+                        if last_indexed >= height {
                             let _ = sender.send(());
                             continue;
                         }
@@ -141,10 +197,66 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
 
                             *self.forkchoice.lock().expect("poisoned") = forkchoice;
 
+                            // Parse execution requests
+                            for request_bytes in block.execution_requests {
+                                match ExecutionRequest::try_from(request_bytes.as_ref()) {
+                                    Ok(execution_request) => {
+                                        match execution_request {
+                                            ExecutionRequest::Deposit(deposit_request) => {
+                                                self.deposit_queue.push(deposit_request);
+                                            }
+                                            ExecutionRequest::Withdrawal(withdrawal_request) => {
+                                                self.withdrawal_queue.push(withdrawal_request);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to parse execution request: {}", e);
+                                    }
+                                }
+                            }
+
+                            // Add validators that deposited to the validator set
+                            let last_indexed = *self.state_variables.get(&FixedBytes::new(LATEST_KEY)).unwrap_or(&0);
+                            if last_indexed % self.validator_onboarding_interval == 0 {
+                                for _ in 0..self.validator_onboarding_limit_per_block {
+                                    if let Some(request) = self.deposit_queue.peek() {
+                                        let mut validator_balance = 0;
+                                        if let Some(account) = self.accounts.get_mut(&FixedBytes::new(request.bls_pubkey)) {
+                                            // Since we only remove the request from the queue after processing it,
+                                            // it can happen that the binary crashes, and then we will process the same request twice.
+                                            // If the index matches, we are processing the same request that we already processed. In that
+                                            // case we won't increment the balance.
+                                            if request.index > account.index {
+                                                account.amount += request.amount;
+                                                validator_balance += account.amount;
+
+                                            }
+                                        } else {
+                                            self.accounts.put(FixedBytes::new(request.bls_pubkey), request.clone());
+                                            validator_balance += request.amount;
+                                        }
+                                        if validator_balance > self.validator_minimum_stake {
+                                            if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone()) {
+                                                // This only happens if the key already exists
+                                                warn!("Failed to add validator: {}", e);
+                                            }
+                                        }
+
+                                        // Only remove the request from the queue after we processed and stored it
+                                        let _ = self.deposit_queue.pop();
+                                    }
+
+                                }
+                            }
+
+                            // TODO(matthias): verify what happens if the binary shuts down before storing the deposits to disk.
+                            // I think it should be okay, because we only set `last_indexed` after writing to disk.
+
                             info!(new_height, "finalized block");
                         }
 
-                        self.last_indexed = new_height;
+                        self.state_variables.put(FixedBytes::new(LATEST_KEY), new_height);
                         self.height_notifier.notify_up_to(new_height);
                         let _ = notifier.send(());
                     },
