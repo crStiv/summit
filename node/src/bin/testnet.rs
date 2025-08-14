@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .instance(x + 1)
                     .keep_stdout()
                     //    .genesis(serde_json::from_str(&genesis_str).expect("invalid genesis"))
-                    .data_dir(format!("testnet/node{}/data/reth_db", x))
+                    .data_dir(format!("testnet/node{x}/data/reth_db"))
                     .arg("--authrpc.jwtsecret")
                     .arg("testnet/jwt.hex");
 
@@ -120,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut flags = get_node_flags(x.into());
                 flags.engine_port = auth_port;
                 // Start our consensus engine
-                println!("******** STARTING CONSENSUS ENGINE FOR NODE {}", x);
+                println!("******** STARTING CONSENSUS ENGINE FOR NODE {x}");
                 let handle = run_node_with_runtime(context.with_label(&format!("node{x}")), flags);
                 consensus_handles.push(handle);
             }

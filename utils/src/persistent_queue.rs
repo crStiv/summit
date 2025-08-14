@@ -163,7 +163,7 @@ impl<E: Clock + Storage + Metrics, V: Codec> PersistentQueue<E, V> {
         }
 
         // Use get() instead of remove() to peek without removing
-        self.values.get(&head_key)
+        self.values.get(head_key)
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::{
-    ApplicationConfig, Registry,
+    ApplicationConfig,
     engine_client::EngineClient,
     finalizer::{Finalizer, FinalizerMailbox},
     ingress::{Mailbox, Message},

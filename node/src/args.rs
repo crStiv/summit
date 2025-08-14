@@ -7,7 +7,6 @@ use crate::{
     keys::KeySubCmd,
     utils::get_expanded_path,
 };
-use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use commonware_cryptography::Signer;
 use commonware_p2p::authenticated;
