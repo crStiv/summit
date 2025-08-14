@@ -21,4 +21,6 @@ pub struct ApplicationConfig<C: EngineClient> {
 
     /// The maximum number of validators that will be onboarded at the same time
     pub validator_onboarding_limit_per_block: usize,
+    
+    pub validator_minimum_stake: u64, // in gwei
 }
