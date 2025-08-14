@@ -38,6 +38,7 @@ const MAX_REPAIR: u64 = 20;
 // Onboarding config (set arbitrarily for now)
 const VALIDATOR_ONBOARDING_INTERVAL: u64 = 10;
 const VALIDATOR_ONBOARDING_LIMIT_PER_BLOCK: usize = 3;
+const VALIDATOR_MINIMUM_STAKE: u64 = 32_000_000_000; // in gwei
 //
 
 pub struct Engine<
@@ -86,6 +87,7 @@ impl<
                 genesis_hash: cfg.genesis_hash,
                 validator_onboarding_interval: VALIDATOR_ONBOARDING_INTERVAL,
                 validator_onboarding_limit_per_block: VALIDATOR_ONBOARDING_LIMIT_PER_BLOCK,
+                validator_minimum_stake: VALIDATOR_MINIMUM_STAKE,
             },
         )
         .await;

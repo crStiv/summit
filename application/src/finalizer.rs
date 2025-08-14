@@ -54,11 +54,14 @@ pub struct Finalizer<
     validator_onboarding_interval: u64,
 
     validator_onboarding_limit_per_block: usize,
+
+    validator_minimum_stake: u64 // in gwei
 }
 
 impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient>
     Finalizer<R, C>
 {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         context: R,
         engine_client: C,
@@ -67,6 +70,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         db_prefix: String,
         validator_onboarding_interval: u64,
         validator_onboarding_limit_per_block: usize,
+        validator_minimum_stake: u64,
     ) -> (
         Self,
         FinalizerMailbox,
@@ -131,6 +135,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 state_variables,
                 validator_onboarding_interval,
                 validator_onboarding_limit_per_block,
+                validator_minimum_stake,
             },
             FinalizerMailbox::new(tx_finalizer),
             tx_height_notify,
@@ -217,10 +222,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                             if last_indexed % self.validator_onboarding_interval == 0 {
                                 for _ in 0..self.validator_onboarding_limit_per_block {
                                     if let Some(request) = self.deposit_queue.peek() {
-                                        if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone()) {
-                                            // This only happens if the key already exists
-                                            warn!("Failed to add validator: {}", e);
-                                        }
+                                        let mut validator_balance = 0;
                                         if let Some(account) = self.accounts.get_mut(&FixedBytes::new(request.bls_pubkey)) {
                                             // Since we only remove the request from the queue after processing it,
                                             // it can happen that the binary crashes, and then we will process the same request twice.
@@ -228,9 +230,18 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             // case we won't increment the balance.
                                             if request.index > account.index {
                                                 account.amount += request.amount;
+                                                validator_balance += account.amount;
+
                                             }
                                         } else {
                                             self.accounts.put(FixedBytes::new(request.bls_pubkey), request.clone());
+                                            validator_balance += request.amount;
+                                        }
+                                        if validator_balance > self.validator_minimum_stake {
+                                            if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone()) {
+                                                // This only happens if the key already exists
+                                                warn!("Failed to add validator: {}", e);
+                                            }
                                         }
 
                                         // Only remove the request from the queue after we processed and stored it
