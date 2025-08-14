@@ -203,6 +203,7 @@ pub fn all_online(n: u32, seed: u64, link: Link, required: u64, verify_consensus
         }
 
         // Poll metrics
+        let mut num_nodes_finished = 0;
         loop {
             let metrics = context.encode();
 
@@ -231,8 +232,11 @@ pub fn all_online(n: u32, seed: u64, link: Link, required: u64, verify_consensus
                    // if metric.ends_with("_simplex_voter_journal_synced_total") {
                     let value = value.parse::<u64>().unwrap();
                     if value >= required {
-                        success = true;
-                        break;
+                        num_nodes_finished += 1;
+                        if num_nodes_finished == n {
+                            success = true;
+                            break;
+                        }
                     }
                 }
             }
