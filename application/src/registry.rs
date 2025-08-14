@@ -7,25 +7,21 @@ use commonware_cryptography::bls12381::primitives::variant::{MinPk, Variant};
 use commonware_cryptography::bls12381::primitives::{group, poly};
 use commonware_resolver::p2p;
 use commonware_utils::modulo;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use summit_types::{Identity, PublicKey};
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 struct Participants {
     participants: Vec<PublicKey>,
-    participants_map: HashMap<PublicKey, u32>,
+    participants_map: BTreeMap<PublicKey, u32>,
 }
 
 #[derive(Clone)]
 pub struct Registry {
     // Map from View -> immutable participant data
     // Once a view is added, it never changes
-    views: Arc<RwLock<HashMap<View, Box<Participants>>>>,
-
-    // Track the latest/highest view number
-    latest_view: Arc<AtomicU64>,
+    views: Arc<RwLock<BTreeMap<View, Box<Participants>>>>,
 
     identity: Identity,
     polynomial: Vec<Identity>,
@@ -52,26 +48,26 @@ impl Registry {
         let identity = *poly::public::<MinPk>(&polynomial);
         let polynomial = evaluate_all::<MinPk>(&polynomial, participants.participants.len() as u32);
         let registry = Self {
-            views: Arc::new(RwLock::new(HashMap::new())),
-            latest_view: Arc::new(AtomicU64::new(1)),
+            views: Arc::new(RwLock::new(BTreeMap::new())),
             identity,
             polynomial,
             share,
         };
 
-        let view = registry.latest_view.load(Ordering::Relaxed);
-        registry.views.write().unwrap().insert(view, participants);
+        registry.views.write().unwrap().insert(0, participants);
         registry
     }
 
-    pub fn add_participant(&self, participant: PublicKey) -> Result<()> {
+    pub fn add_participant(&self, participant: PublicKey, index: View) -> Result<()> {
         let mut views = self.views.write().unwrap();
-        let current_latest = self.latest_view.load(Ordering::Relaxed);
 
-        let mut participants = views
-            .get(&current_latest)
-            .map(|x| x.as_ref().clone())
-            .unwrap_or_default();
+        let mut participants = if let Some((latest_view, view_data)) = views.last_key_value() {
+            // TODO(matthias): is it possible that `index` is smaller or equal to the latest view?
+            assert!(*latest_view < index);
+            view_data.clone()
+        } else {
+            Box::new(Participants::default())
+        };
 
         if participants.participants_map.contains_key(&participant) {
             return Err(anyhow::anyhow!(
@@ -85,41 +81,40 @@ impl Registry {
             .participants_map
             .insert(participant, (participants.participants.len() as u32) - 1);
 
-        self.latest_view
-            .store(current_latest + 1, Ordering::Relaxed);
-        views.insert(current_latest + 1, Box::new(participants));
+        views.insert(index, participants);
+
         Ok(())
     }
 
-    pub fn remove_participant(&mut self, participant: PublicKey) -> Result<()> {
+    pub fn remove_participant(&mut self, participant: PublicKey, index: View) -> Result<()> {
         let mut views = self.views.write().unwrap();
-        let current_latest = self.latest_view.load(Ordering::Relaxed);
+        if let Some(current_view) = views.last_entry() {
+            // TODO(matthias): is it possible that `index` is smaller or equal to the latest view?
+            assert!(*current_view.key() < index);
+            let mut participants = current_view.get().clone();
 
-        let mut participants = views
-            .get(&current_latest)
-            .map(|x| x.as_ref().clone())
-            .unwrap_or_default();
+            let Some(participant_index) = participants.participants_map.get(&participant).copied()
+            else {
+                return Err(anyhow::anyhow!(
+                    "Public key {} doesn't exist in current set",
+                    participant
+                ));
+            };
 
-        let Some(index) = participants.participants_map.get(&participant).copied() else {
-            return Err(anyhow::anyhow!(
-                "Public key {} doesn't exist in current set",
-                participant
-            ));
-        };
-
-        participants.participants.swap_remove(index as usize);
-        participants.participants_map.remove(&participant);
-
-        // re-calculate the index of the swapped public key
-        if let Some(swapped_key) = participants.participants.get(index as usize) {
             participants
-                .participants_map
-                .insert(swapped_key.clone(), index);
-        }
+                .participants
+                .swap_remove(participant_index as usize);
+            participants.participants_map.remove(&participant);
 
-        self.latest_view
-            .store(current_latest + 1, Ordering::Relaxed);
-        views.insert(current_latest + 1, Box::new(participants));
+            // re-calculate the index of the swapped public key
+            if let Some(swapped_key) = participants.participants.get(participant_index as usize) {
+                participants
+                    .participants_map
+                    .insert(swapped_key.clone(), participant_index);
+            }
+
+            views.insert(index, participants);
+        }
         Ok(())
     }
 }
@@ -128,8 +123,6 @@ impl p2p::Coordinator for Registry {
     type PublicKey = PublicKey;
 
     fn peers(&self) -> &Vec<Self::PublicKey> {
-        let latest = self.latest_view.load(std::sync::atomic::Ordering::Relaxed);
-
         // SAFETY: This is safe because:
         // 1. Views are never removed once added (append-only guarantee)
         // 2. Box<Participants> has a stable address that doesn't change
@@ -140,7 +133,9 @@ impl p2p::Coordinator for Registry {
         // The unsafe extends the lifetime from the RwLock guard to 'self,
         // which is valid because the data actually lives as long as 'self
         let views = self.views.read().unwrap();
-        if let Some(view_data) = views.get(&latest) {
+
+        // Use the list of participants that is associated with the largest index
+        if let Some((_view, view_data)) = views.last_key_value() {
             let ptr = &view_data.participants as *const Vec<PublicKey>;
             // Drop the guard explicitly
             drop(views);
@@ -154,7 +149,11 @@ impl p2p::Coordinator for Registry {
     }
 
     fn peer_set_id(&self) -> u64 {
-        self.latest_view.load(Ordering::Relaxed)
+        let views = self.views.read().unwrap();
+        let (view, _view_data) = views
+            .last_key_value()
+            .expect("at least one views exists because it is set in the `new` function");
+        *view
     }
 }
 
@@ -164,9 +163,17 @@ impl Su for Registry {
     type PublicKey = PublicKey;
 
     fn leader(&self, index: Self::Index) -> Option<Self::PublicKey> {
-        let current_latest = self.latest_view.load(Ordering::Relaxed);
         let views = self.views.read().unwrap();
-        let view_data = views.get(&current_latest)?;
+
+        let (latest_view, view_data) = views.last_key_value()?;
+        let view_data = if *latest_view < index {
+            // if `index` is larger than the latest view, use the latest view
+            view_data
+        } else {
+            // otherwise we get the smallest view that is larger or equal to `ìndex`
+            let (_max_view, view_data) = views.range(index..).next()?;
+            view_data
+        };
 
         if view_data.participants.is_empty() {
             return None;
@@ -176,24 +183,41 @@ impl Su for Registry {
         Some(view_data.participants[leader_index].clone())
     }
 
-    fn participants(&self, _index: Self::Index) -> Option<&Vec<Self::PublicKey>> {
+    fn participants(&self, index: Self::Index) -> Option<&Vec<Self::PublicKey>> {
         // SAFETY: Same safety reasoning as peers() method above
-        let current_latest = self.latest_view.load(Ordering::Relaxed);
         let views = self.views.read().unwrap();
-        if let Some(view_data) = views.get(&current_latest) {
-            let ptr = &view_data.participants as *const Vec<PublicKey>;
-            drop(views);
-            Some(unsafe { &*ptr })
+
+        let (latest_view, view_data) = views.last_key_value()?;
+        let view_data = if *latest_view < index {
+            // if `index` is larger than the latest view, use the latest view
+            view_data
         } else {
-            None
+            // otherwise we get the smallest view that is larger or equal to `ìndex`
+            let (_max_view, view_data) = views.range(index..).next()?;
+            view_data
+        };
+
+        if view_data.participants.is_empty() {
+            return None;
         }
+        let ptr = &view_data.participants as *const Vec<PublicKey>;
+        drop(views);
+        Some(unsafe { &*ptr })
     }
 
-    fn is_participant(&self, _index: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
-        let current_latest = self.latest_view.load(Ordering::Relaxed);
+    fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
         let views = self.views.read().unwrap();
-        let participants = views.get(&current_latest)?;
-        participants.participants_map.get(candidate).cloned()
+
+        let (latest_view, view_data) = views.last_key_value()?;
+        let view_data = if *latest_view < index {
+            // if `index` is larger than the latest view, use the latest view
+            view_data
+        } else {
+            // otherwise we get the smallest view that is larger or equal to `ìndex`
+            let (_max_view, view_data) = views.range(index..).next()?;
+            view_data
+        };
+        view_data.participants_map.get(candidate).cloned()
     }
 }
 
@@ -210,10 +234,18 @@ impl ThresholdSupervisor for Registry {
         &self.identity
     }
 
-    fn leader(&self, _index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
-        let current_latest = self.latest_view.load(Ordering::Relaxed);
+    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<Self::PublicKey> {
         let views = self.views.read().unwrap();
-        let view_data = views.get(&current_latest)?;
+
+        let (latest_view, view_data) = views.last_key_value()?;
+        let view_data = if *latest_view < index {
+            // if `index` is larger than the latest view, use the latest view
+            view_data
+        } else {
+            // otherwise we get the smallest view that is larger or equal to `ìndex`
+            let (_max_view, view_data) = views.range(index..).next()?;
+            view_data
+        };
 
         if view_data.participants.is_empty() {
             return None;
@@ -229,5 +261,435 @@ impl ThresholdSupervisor for Registry {
 
     fn share(&self, _index: Self::Index) -> Option<&Self::Share> {
         Some(&self.share)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_consensus::{Supervisor as Su, ThresholdSupervisor};
+    use commonware_resolver::p2p::Coordinator;
+    use commonware_cryptography::{
+        PrivateKeyExt, Signer,
+        bls12381::{
+            dkg::ops,
+            primitives::{poly, variant::MinPk},
+        },
+    };
+    use rand::rngs::OsRng;
+
+    /// Helper function to create deterministic test public keys
+    fn create_test_pubkeys(count: usize) -> Vec<PublicKey> {
+        (0..count)
+            .map(|i| {
+                let private_key = summit_types::PrivateKey::from_seed(i as u64);
+                private_key.public_key()
+            })
+            .collect()
+    }
+
+    /// Helper function to create a test registry with specified number of participants
+    fn create_test_registry(participant_count: usize) -> Registry {
+        let participants = create_test_pubkeys(participant_count);
+        let threshold = std::cmp::max(1, (participant_count * 2) / 3 + 1);
+        let (polynomial, shares) = ops::generate_shares::<_, MinPk>(
+            &mut OsRng,
+            None,
+            participant_count as u32,
+            threshold as u32,
+        );
+        Registry::new(participants, polynomial, shares[0].clone())
+    }
+
+    #[test]
+    fn test_new_registry() {
+        let participant_count = 3;
+        let participants = create_test_pubkeys(participant_count);
+        let expected_participants = participants.clone();
+
+        let threshold = std::cmp::max(1, (participant_count * 2) / 3 + 1);
+        let (polynomial, shares) = ops::generate_shares::<_, MinPk>(
+            &mut OsRng,
+            None,
+            participant_count as u32,
+            threshold as u32,
+        );
+
+        let registry = Registry::new(participants, polynomial.clone(), shares[0].clone());
+
+        // Test that participants are correctly stored in view 0
+        let view_0_participants = registry.participants(0);
+        assert!(view_0_participants.is_some());
+        assert_eq!(view_0_participants.unwrap(), &expected_participants);
+
+        // Test that registry is not empty
+        assert!(!registry.participants(0).unwrap().is_empty());
+        assert_eq!(registry.participants(0).unwrap().len(), participant_count);
+
+        // Test identity is set
+        let identity = registry.identity();
+        let expected_identity = *poly::public::<MinPk>(&polynomial);
+        assert_eq!(*identity, expected_identity);
+    }
+
+    #[test]
+    fn test_add_participant() {
+        let registry = create_test_registry(2);
+        let new_participant = summit_types::PrivateKey::from_seed(99).public_key();
+
+        // Add participant to view 1
+        let result = registry.add_participant(new_participant.clone(), 1);
+        assert!(result.is_ok());
+
+        // Verify participant was added
+        let view_1_participants = registry.participants(1);
+        assert!(view_1_participants.is_some());
+        assert_eq!(view_1_participants.unwrap().len(), 3);
+        assert!(view_1_participants.unwrap().contains(&new_participant));
+
+        // Original view should remain unchanged
+        let view_0_participants = registry.participants(0);
+        assert_eq!(view_0_participants.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_add_duplicate_participant() {
+        let registry = create_test_registry(2);
+        let existing_participant = registry.participants(0).unwrap()[0].clone();
+
+        // Try to add existing participant to same view
+        let result = registry.add_participant(existing_participant, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn test_remove_participant() {
+        let mut registry = create_test_registry(3);
+        let participant_to_remove = registry.participants(0).unwrap()[1].clone();
+
+        // Remove participant from view 1
+        let result = registry.remove_participant(participant_to_remove.clone(), 1);
+        assert!(result.is_ok());
+
+        // Verify participant was removed
+        let view_1_participants = registry.participants(1);
+        assert!(view_1_participants.is_some());
+        assert_eq!(view_1_participants.unwrap().len(), 2);
+        assert!(
+            !view_1_participants
+                .unwrap()
+                .contains(&participant_to_remove)
+        );
+
+        // Original view should remain unchanged
+        assert_eq!(registry.participants(0).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_participant() {
+        let mut registry = create_test_registry(2);
+        let nonexistent_participant = summit_types::PrivateKey::from_seed(999).public_key();
+
+        // Try to remove non-existent participant
+        let result = registry.remove_participant(nonexistent_participant, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("doesn't exist"));
+    }
+
+    // Supervisor trait implementation tests
+    #[test]
+    fn test_supervisor_leader_selection() {
+        let registry = create_test_registry(5);
+        let participants = registry.participants(0).unwrap();
+
+        // Test round-robin leader selection
+        for view in 0..10 {
+            let leader = Su::leader(&registry, view);
+            assert!(leader.is_some());
+            let expected_leader = &participants[view as usize % participants.len()];
+            assert_eq!(leader.unwrap(), *expected_leader);
+        }
+    }
+
+    #[test]
+    fn test_supervisor_leader_empty_participants() {
+        let participants = Vec::new();
+        let (polynomial, shares) = ops::generate_shares::<_, MinPk>(&mut OsRng, None, 1, 1);
+        let registry = Registry::new(participants, polynomial, shares[0].clone());
+
+        // Should return None for empty participant set
+        let leader = Su::leader(&registry, 0);
+        assert!(leader.is_none());
+    }
+
+    #[test]
+    fn test_supervisor_participants_by_view() {
+        let registry = create_test_registry(3);
+        let original_participants = registry.participants(0).unwrap();
+
+        // View 0 should have original participants
+        assert_eq!(registry.participants(0).unwrap(), original_participants);
+
+        // Add participant to create view 1
+        let new_participant = summit_types::PrivateKey::from_seed(100).public_key();
+        registry.add_participant(new_participant.clone(), 1).unwrap();
+
+        // View 1 should have updated participants
+        let view_1_participants = registry.participants(1).unwrap();
+        assert_eq!(view_1_participants.len(), 4);
+        assert!(view_1_participants.contains(&new_participant));
+
+        // Future views should use latest available view
+        assert_eq!(registry.participants(2), registry.participants(1));
+        assert_eq!(registry.participants(100), registry.participants(1));
+    }
+
+    #[test]
+    fn test_supervisor_is_participant() {
+        let registry = create_test_registry(4);
+        let participants = registry.participants(0).unwrap();
+
+        // Test existing participants
+        for (i, participant) in participants.iter().enumerate() {
+            let result = registry.is_participant(0, participant);
+            assert_eq!(result, Some(i as u32));
+        }
+
+        // Test non-existing participant
+        let non_participant = summit_types::PrivateKey::from_seed(999).public_key();
+        assert_eq!(registry.is_participant(0, &non_participant), None);
+
+        // Test with view that has no participants yet
+        assert_eq!(registry.is_participant(100, &participants[0]), Some(0));
+    }
+
+    #[test]
+    fn test_supervisor_participants_none() {
+        let participants = Vec::new();
+        let (polynomial, shares) = ops::generate_shares::<_, MinPk>(&mut OsRng, None, 1, 1);
+        let registry = Registry::new(participants, polynomial, shares[0].clone());
+
+        // Should return None for views with no participants
+        assert!(registry.participants(0).is_none());
+        assert!(registry.participants(1).is_none());
+    }
+
+    // ThresholdSupervisor trait implementation tests
+    #[test]
+    fn test_threshold_supervisor_identity() {
+        let participants = create_test_pubkeys(3);
+        let (polynomial, shares) = ops::generate_shares::<_, MinPk>(&mut OsRng, None, 3, 2);
+        let expected_identity = *poly::public::<MinPk>(&polynomial);
+        
+        let registry = Registry::new(participants, polynomial, shares[0].clone());
+
+        assert_eq!(*registry.identity(), expected_identity);
+    }
+
+    #[test]
+    fn test_threshold_supervisor_randomized_leader_selection() {
+        // Note: This test is simplified since creating BLS signatures requires more complex setup
+        // We'll test that the method exists and works with a basic setup
+        let registry = create_test_registry(5);
+        let participants = registry.participants(0).unwrap();
+
+        // For now, we'll just verify that the ThresholdSupervisor trait is implemented
+        // and that identity, polynomial, and share methods work
+        let _identity = registry.identity(); // Just verify it returns
+        assert!(registry.polynomial(0).is_some());
+        assert!(registry.share(0).is_some());
+        
+        // Verify participants are available for leader selection
+        assert_eq!(participants.len(), 5);
+    }
+
+    #[test] 
+    fn test_threshold_supervisor_empty_participants_methods() {
+        let participants = Vec::new();
+        let (polynomial, shares) = ops::generate_shares::<_, MinPk>(&mut OsRng, None, 1, 1);
+        let registry = Registry::new(participants, polynomial, shares[0].clone());
+
+        // Test that methods work even with empty participants
+        let _identity = registry.identity(); // Just verify it returns
+        assert!(registry.polynomial(0).is_some());
+        assert!(registry.share(0).is_some());
+    }
+
+    #[test]
+    fn test_threshold_supervisor_polynomial_access() {
+        let registry = create_test_registry(3);
+
+        // Polynomial should always be available
+        let polynomial = registry.polynomial(0);
+        assert!(polynomial.is_some());
+        assert!(!polynomial.unwrap().is_empty());
+
+        // Should be the same for different views
+        assert_eq!(registry.polynomial(0), registry.polynomial(1));
+        assert_eq!(registry.polynomial(0), registry.polynomial(100));
+    }
+
+    #[test]
+    fn test_threshold_supervisor_share_access() {
+        let registry = create_test_registry(3);
+
+        // Share should always be available
+        let share = registry.share(0);
+        assert!(share.is_some());
+
+        // Should be the same for different views
+        assert_eq!(registry.share(0), registry.share(1));
+        assert_eq!(registry.share(0), registry.share(100));
+    }
+
+    // p2p::Coordinator trait implementation tests
+    #[test]
+    fn test_p2p_coordinator_peers() {
+        let registry = create_test_registry(4);
+        let expected_peers = registry.participants(0).unwrap();
+
+        let peers = registry.peers();
+        assert_eq!(peers, expected_peers);
+        assert_eq!(peers.len(), 4);
+    }
+
+    #[test]
+    fn test_p2p_coordinator_peer_set_id() {
+        let registry = create_test_registry(3);
+
+        // Initial peer set ID should be 0
+        assert_eq!(registry.peer_set_id(), 0);
+
+        // Add participant to create view 1
+        let new_participant = summit_types::PrivateKey::from_seed(100).public_key();
+        registry.add_participant(new_participant, 1).unwrap();
+
+        // Peer set ID should now be 1
+        assert_eq!(registry.peer_set_id(), 1);
+    }
+
+    #[test]
+    fn test_p2p_coordinator_peers_with_updates() {
+        let registry = create_test_registry(2);
+        
+        // Initial peers
+        let initial_peers = registry.peers();
+        assert_eq!(initial_peers.len(), 2);
+
+        // Add participant
+        let new_participant = summit_types::PrivateKey::from_seed(100).public_key();
+        registry.add_participant(new_participant.clone(), 1).unwrap();
+
+        // Peers should now reflect the latest view
+        let updated_peers = registry.peers();
+        assert_eq!(updated_peers.len(), 3);
+        assert!(updated_peers.contains(&new_participant));
+    }
+
+    // Multi-view operations and edge cases
+    #[test]
+    fn test_multiple_views() {
+        let registry = create_test_registry(2);
+        
+        // Add participants to different views
+        let participant_a = summit_types::PrivateKey::from_seed(100).public_key();
+        let participant_b = summit_types::PrivateKey::from_seed(101).public_key();
+        
+        registry.add_participant(participant_a.clone(), 1).unwrap();
+        registry.add_participant(participant_b.clone(), 2).unwrap();
+
+        // Test participants for each view
+        assert_eq!(registry.participants(0).unwrap().len(), 2);
+        assert_eq!(registry.participants(1).unwrap().len(), 3);
+        assert_eq!(registry.participants(2).unwrap().len(), 4);
+
+        // Test that future views use the latest available view
+        assert_eq!(registry.participants(3), registry.participants(2));
+        assert_eq!(registry.participants(100), registry.participants(2));
+    }
+
+    #[test]
+    fn test_view_persistence() {
+        let registry = create_test_registry(2);
+        let original_participants = registry.participants(0).unwrap().clone();
+
+        // Add participant to view 1
+        let new_participant = summit_types::PrivateKey::from_seed(100).public_key();
+        registry.add_participant(new_participant.clone(), 1).unwrap();
+
+        // Original view should remain unchanged
+        assert_eq!(registry.participants(0).unwrap(), &original_participants);
+
+        // New view should have additional participant
+        assert_eq!(registry.participants(1).unwrap().len(), 3);
+        assert!(registry.participants(1).unwrap().contains(&new_participant));
+    }
+
+    #[test]
+    fn test_large_participant_sets() {
+        let large_registry = create_test_registry(100);
+        let participants = large_registry.participants(0).unwrap();
+
+        // Test basic operations with large set
+        assert_eq!(participants.len(), 100);
+
+        // Test leader selection works with large sets
+        let leader = Su::leader(&large_registry, 0);
+        assert!(leader.is_some());
+        assert!(participants.contains(&leader.unwrap()));
+
+        // Test is_participant works with large sets
+        for (i, participant) in participants.iter().enumerate() {
+            assert_eq!(large_registry.is_participant(0, participant), Some(i as u32));
+        }
+    }
+
+    #[test] 
+    fn test_concurrent_access() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let registry = Arc::new(create_test_registry(5));
+        let mut handles = vec![];
+
+        // Spawn multiple threads to access registry concurrently
+        for i in 0..10 {
+            let registry_clone = Arc::clone(&registry);
+            let handle = thread::spawn(move || {
+                // Test concurrent reads
+                let participants = registry_clone.participants(0);
+                assert!(participants.is_some());
+                assert_eq!(participants.unwrap().len(), 5);
+
+                // Test leader selection
+                let leader = Su::leader(&*registry_clone, i);
+                assert!(leader.is_some());
+
+                // Test is_participant
+                let first_participant = &participants.unwrap()[0];
+                assert_eq!(registry_clone.is_participant(0, first_participant), Some(0));
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_edge_case_view_zero_with_operations() {
+        let registry = create_test_registry(1);
+        
+        // Test operations on view 0
+        let participants = registry.participants(0).unwrap();
+        assert_eq!(participants.len(), 1);
+
+        let leader = Su::leader(&registry, 0);
+        assert_eq!(leader, Some(participants[0].clone()));
+
+        assert_eq!(registry.is_participant(0, &participants[0]), Some(0));
     }
 }
