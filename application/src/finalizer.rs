@@ -217,7 +217,6 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                             }
 
                             // Add validators that deposited to the validator set
-                            // TODO(matthias): I think `last_indexed` isn't necessary incremented by 1
                             let last_indexed = *self.state_variables.get(&FixedBytes::new(LATEST_KEY)).unwrap_or(&0);
                             if last_indexed % self.validator_onboarding_interval == 0 {
                                 for _ in 0..self.validator_onboarding_limit_per_block {
