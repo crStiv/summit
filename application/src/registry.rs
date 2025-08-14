@@ -100,7 +100,7 @@ impl Registry {
             .map(|x| x.as_ref().clone())
             .unwrap_or_default();
 
-        let Some(index) = participants.participants_map.get(&participant).map(|x| *x) else {
+        let Some(index) = participants.participants_map.get(&participant).copied() else {
             return Err(anyhow::anyhow!(
                 "Public key {} doesn't exist in current set",
                 participant

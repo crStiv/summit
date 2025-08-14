@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Process each node
     for i in 0usize..args.nodes as usize {
-        let node_dir = format!("./testnet/node{}", i);
+        let node_dir = format!("./testnet/node{i}");
 
         // Create directory if it doesn't exist
         fs::create_dir_all(&node_dir)?;
@@ -90,13 +90,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let key_path = Path::new(&node_dir).join("key.pem");
         let private_key_hex = hex(&private_keys[i].1);
         fs::write(&key_path, private_key_hex)?;
-        println!("Written private key to {:?}", key_path);
+        println!("Written private key to {key_path:?}");
 
         // Write share
         let share_path = Path::new(&node_dir).join("share.pem");
         let share_hex = hex(&shares[i].encode());
         fs::write(&share_path, share_hex)?;
-        println!("Written share to {:?}", share_path);
+        println!("Written share to {share_path:?}");
 
         // Update the public key in genesis config
         genesis_config.validators[i].public_key = hex(&private_keys[i].0);
@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Write the updated genesis config
     let updated_genesis = toml::to_string_pretty(&genesis_config)?;
     fs::write(genesis_path, updated_genesis)?;
-    println!("Updated genesis config at {}", genesis_path);
+    println!("Updated genesis config at {genesis_path}");
 
     println!("\nSetup complete for {} nodes", args.nodes);
 

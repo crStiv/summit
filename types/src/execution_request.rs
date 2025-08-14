@@ -4,6 +4,7 @@ use commonware_codec::{DecodeExt, Encode, Error, FixedSize, Read, Write};
 
 use crate::PublicKey;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutionRequest {
     // EIP-6110

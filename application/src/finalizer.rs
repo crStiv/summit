@@ -9,7 +9,7 @@ use alloy_rpc_types_engine::ForkchoiceState;
 use commonware_consensus::Reporter;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
-use commonware_storage::metadata::{self, Config, Metadata};
+use commonware_storage::metadata::{Config, Metadata};
 use commonware_utils::{hex, sequence::FixedBytes};
 use futures::{
     SinkExt as _, StreamExt,
@@ -221,7 +221,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             // This only happens if the key already exists
                                             warn!("Failed to add validator: {}", e);
                                         }
-                                        if let Some(account) = self.accounts.get_mut(&FixedBytes::new(request.bls_pubkey.clone())) {
+                                        if let Some(account) = self.accounts.get_mut(&FixedBytes::new(request.bls_pubkey)) {
                                             // Since we only remove the request from the queue after processing it,
                                             // it can happen that the binary crashes, and then we will process the same request twice.
                                             // If the index matches, we are processing the same request that we already processed. In that

@@ -37,7 +37,7 @@ impl KeySubCmd {
         std::fs::write(path, encoded_priv_key).expect("Unable to write private key to disk");
 
         println!("Key generated:");
-        println!("Public Key: {}", pub_key);
+        println!("Public Key: {pub_key}");
     }
 
     fn show_key(&self, flags: &Flags) {
