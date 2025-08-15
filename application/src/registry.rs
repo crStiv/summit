@@ -268,7 +268,6 @@ impl ThresholdSupervisor for Registry {
 mod tests {
     use super::*;
     use commonware_consensus::{Supervisor as Su, ThresholdSupervisor};
-    use commonware_resolver::p2p::Coordinator;
     use commonware_cryptography::{
         PrivateKeyExt, Signer,
         bls12381::{
@@ -276,6 +275,7 @@ mod tests {
             primitives::{poly, variant::MinPk},
         },
     };
+    use commonware_resolver::p2p::Coordinator;
     use rand::rngs::OsRng;
 
     /// Helper function to create deterministic test public keys
@@ -433,7 +433,9 @@ mod tests {
 
         // Add participant to create view 1
         let new_participant = summit_types::PrivateKey::from_seed(100).public_key();
-        registry.add_participant(new_participant.clone(), 1).unwrap();
+        registry
+            .add_participant(new_participant.clone(), 1)
+            .unwrap();
 
         // View 1 should have updated participants
         let view_1_participants = registry.participants(1).unwrap();
@@ -481,7 +483,7 @@ mod tests {
         let participants = create_test_pubkeys(3);
         let (polynomial, shares) = ops::generate_shares::<_, MinPk>(&mut OsRng, None, 3, 2);
         let expected_identity = *poly::public::<MinPk>(&polynomial);
-        
+
         let registry = Registry::new(participants, polynomial, shares[0].clone());
 
         assert_eq!(*registry.identity(), expected_identity);
@@ -499,12 +501,12 @@ mod tests {
         let _identity = registry.identity(); // Just verify it returns
         assert!(registry.polynomial(0).is_some());
         assert!(registry.share(0).is_some());
-        
+
         // Verify participants are available for leader selection
         assert_eq!(participants.len(), 5);
     }
 
-    #[test] 
+    #[test]
     fn test_threshold_supervisor_empty_participants_methods() {
         let participants = Vec::new();
         let (polynomial, shares) = ops::generate_shares::<_, MinPk>(&mut OsRng, None, 1, 1);
@@ -572,14 +574,16 @@ mod tests {
     #[test]
     fn test_p2p_coordinator_peers_with_updates() {
         let registry = create_test_registry(2);
-        
+
         // Initial peers
         let initial_peers = registry.peers();
         assert_eq!(initial_peers.len(), 2);
 
         // Add participant
         let new_participant = summit_types::PrivateKey::from_seed(100).public_key();
-        registry.add_participant(new_participant.clone(), 1).unwrap();
+        registry
+            .add_participant(new_participant.clone(), 1)
+            .unwrap();
 
         // Peers should now reflect the latest view
         let updated_peers = registry.peers();
@@ -591,11 +595,11 @@ mod tests {
     #[test]
     fn test_multiple_views() {
         let registry = create_test_registry(2);
-        
+
         // Add participants to different views
         let participant_a = summit_types::PrivateKey::from_seed(100).public_key();
         let participant_b = summit_types::PrivateKey::from_seed(101).public_key();
-        
+
         registry.add_participant(participant_a.clone(), 1).unwrap();
         registry.add_participant(participant_b.clone(), 2).unwrap();
 
@@ -616,7 +620,9 @@ mod tests {
 
         // Add participant to view 1
         let new_participant = summit_types::PrivateKey::from_seed(100).public_key();
-        registry.add_participant(new_participant.clone(), 1).unwrap();
+        registry
+            .add_participant(new_participant.clone(), 1)
+            .unwrap();
 
         // Original view should remain unchanged
         assert_eq!(registry.participants(0).unwrap(), &original_participants);
@@ -641,11 +647,14 @@ mod tests {
 
         // Test is_participant works with large sets
         for (i, participant) in participants.iter().enumerate() {
-            assert_eq!(large_registry.is_participant(0, participant), Some(i as u32));
+            assert_eq!(
+                large_registry.is_participant(0, participant),
+                Some(i as u32)
+            );
         }
     }
 
-    #[test] 
+    #[test]
     fn test_concurrent_access() {
         use std::sync::Arc;
         use std::thread;
@@ -682,7 +691,7 @@ mod tests {
     #[test]
     fn test_edge_case_view_zero_with_operations() {
         let registry = create_test_registry(1);
-        
+
         // Test operations on view 0
         let participants = registry.participants(0).unwrap();
         assert_eq!(participants.len(), 1);
