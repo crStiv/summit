@@ -1,30 +1,24 @@
 use commonware_cryptography::{
-    PrivateKeyExt,
-    Signer,
-    bls12381::{
-        dkg::ops,
-        primitives::{
-            variant::MinPk,
-        },
-    },
+    PrivateKeyExt, Signer,
+    bls12381::{dkg::ops, primitives::variant::MinPk},
 };
 
+use crate::test_harness::mock_engine_client::MockEngineNetwork;
+use crate::{config::EngineConfig, engine::Engine};
+use alloy_signer::k256::elliptic_curve::rand_core::OsRng;
 use commonware_p2p::simulated::{self, Link, Network, Oracle, Receiver, Sender};
 use commonware_runtime::{
     Clock, Metrics, Runner as _,
     deterministic::{self, Runner},
 };
 use commonware_utils::{from_hex_formatted, quorum};
-use summit_types::{PrivateKey, PublicKey};
-use crate::test_harness::mock_engine_client::MockEngineNetwork;
-use crate::{config::EngineConfig, engine::Engine};
-use alloy_signer::k256::elliptic_curve::rand_core::OsRng;
 use governor::Quota;
 use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU32,
 };
+use summit_types::{PrivateKey, PublicKey};
 
 async fn link_validators(
     oracle: &mut Oracle<PublicKey>,
@@ -94,7 +88,13 @@ async fn register_validators(
     registrations
 }
 
-pub fn all_online(n: u32, seed: u64, link: Link, run_until_height: u64, verify_consensus: bool) -> String {
+pub fn all_online(
+    n: u32,
+    seed: u64,
+    link: Link,
+    run_until_height: u64,
+    verify_consensus: bool,
+) -> String {
     // Create context
     let threshold = quorum(n);
     let cfg = deterministic::Config::default().with_seed(seed);
@@ -239,7 +239,11 @@ pub fn all_online(n: u32, seed: u64, link: Link, run_until_height: u64, verify_c
         }
 
         if verify_consensus {
-            assert!(engine_client_network.verify_consensus(Some(run_until_height)).is_ok());
+            assert!(
+                engine_client_network
+                    .verify_consensus(Some(run_until_height))
+                    .is_ok()
+            );
         }
 
         context.auditor().state()

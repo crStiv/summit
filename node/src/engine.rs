@@ -7,10 +7,13 @@ use commonware_cryptography::{
     bls12381::primitives::{poly::public, variant::MinPk},
 };
 use commonware_p2p::{Blocker, Receiver, Sender};
+use commonware_runtime::buffer::PoolRef;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
+use commonware_utils::{NZU64, NZUsize};
 use futures::future::try_join_all;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
+use std::num::NonZero;
 use summit_application::ApplicationConfig;
 use summit_application::engine_client::EngineClient;
 use summit_application::finalizer::FinalizerMailbox;
@@ -20,19 +23,22 @@ use tracing::{error, warn};
 
 /// To better support peers near tip during network instability, we multiply
 /// the consensus activity timeout by this factor.
-const REPLAY_BUFFER: usize = 8 * 1024 * 1024;
-const WRITE_BUFFER: usize = 1024 * 1024;
+const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024);
+const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024);
 
 // Marshal config
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
-const PRUNABLE_ITEMS_PER_SECTION: u64 = 4_096;
-const IMMUTABLE_ITEMS_PER_SECTION: u64 = 262_144;
+const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
+const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);
 const FREEZER_INITIAL_SIZE: u32 = 65_536; // todo(dalton): Check this default
 const FREEZER_TABLE_RESIZE_FREQUENCY: u8 = 4;
 const FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 2u32.pow(16); // 3MB
 const FREEZER_JOURNAL_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 const FREEZER_JOURNAL_COMPRESSION: Option<u8> = Some(3);
 const MAX_REPAIR: u64 = 20;
+
+const BUFFER_POOL_PAGE_SIZE: NonZero<usize> = NZUsize!(4_096); // 4KB
+const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 //
 
 // Onboarding config (set arbitrarily for now)
@@ -104,6 +110,8 @@ impl<
             },
         );
 
+        let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
+
         let (marshal, marshal_mailbox): (_, marshal::Mailbox<MinPk, Block>) = marshal::Actor::init(
             context.with_label("marshal"),
             marshal::Config {
@@ -124,6 +132,7 @@ impl<
                 freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
                 freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
                 freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
+                freezer_journal_buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
                 codec_config: (),
@@ -157,6 +166,7 @@ impl<
                 max_fetch_count: cfg.max_fetch_count,
                 fetch_rate_per_peer: cfg.fetch_rate_per_peer,
                 fetch_concurrent: cfg.fetch_concurrent,
+                buffer_pool,
             },
         );
 
