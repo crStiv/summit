@@ -1,58 +1,72 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Error, Read, Write};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::sequence::FixedBytes;
 use commonware_storage::store::{self, Store};
 use commonware_storage::translator::TwoCap;
+use commonware_utils::sequence::FixedBytes;
 pub use store::Config;
 
 const HEAD_KEY: [u8; 8] = 0u64.to_be_bytes();
 const TAIL_KEY: [u8; 8] = 1u64.to_be_bytes();
-
 
 pub struct PersistentQueue<E: Clock + Storage + Metrics, V: Codec + Read<Cfg = ()>> {
     // Single store for both pointers and values
     store: Store<E, FixedBytes<8>, Value<V>, TwoCap>,
 }
 
-impl<E: Clock + Storage + Metrics, V: Codec + Read<Cfg = ()>> PersistentQueue<E, V>
-{
+impl<E: Clock + Storage + Metrics, V: Codec + Read<Cfg = ()>> PersistentQueue<E, V> {
     // Helper methods to extract pointer values
     async fn get_head_value(&self) -> u64 {
         let head_key = FixedBytes::new(HEAD_KEY);
-        let head_pointer = self.store.get(&head_key).await
+        let head_pointer = self
+            .store
+            .get(&head_key)
+            .await
             .expect("failed to get head")
             .expect("head should be initialized");
-        
+
         if let Value::Pointer(ptr) = head_pointer {
             u64::from_be_bytes(ptr.as_ref().try_into().expect("8 bytes"))
         } else {
             panic!("head should be a pointer");
         }
     }
-    
+
     async fn get_tail_value(&self) -> u64 {
         let tail_key = FixedBytes::new(TAIL_KEY);
-        let tail_pointer = self.store.get(&tail_key).await
+        let tail_pointer = self
+            .store
+            .get(&tail_key)
+            .await
             .expect("failed to get tail")
             .expect("tail should be initialized");
-            
+
         if let Value::Pointer(ptr) = tail_pointer {
             u64::from_be_bytes(ptr.as_ref().try_into().expect("8 bytes"))
         } else {
             panic!("tail should be a pointer");
         }
     }
-    
+
     async fn update_head_pointer(&mut self, value: u64) {
         let head_key = FixedBytes::new(HEAD_KEY);
-        self.store.update(head_key, Value::Pointer(FixedBytes::new(value.to_be_bytes()))).await
+        self.store
+            .update(
+                head_key,
+                Value::Pointer(FixedBytes::new(value.to_be_bytes())),
+            )
+            .await
             .expect("failed to update head pointer");
     }
-    
+
     async fn update_tail_pointer(&mut self, value: u64) {
         let tail_key = FixedBytes::new(TAIL_KEY);
-        self.store.update(tail_key, Value::Pointer(FixedBytes::new(value.to_be_bytes()))).await
+        self.store
+            .update(
+                tail_key,
+                Value::Pointer(FixedBytes::new(value.to_be_bytes())),
+            )
+            .await
             .expect("failed to update tail pointer");
     }
 
@@ -64,14 +78,34 @@ impl<E: Clock + Storage + Metrics, V: Codec + Read<Cfg = ()>> PersistentQueue<E,
         // Initialize head and tail pointers if they don't exist
         let head_key = FixedBytes::new(HEAD_KEY);
         let tail_key = FixedBytes::new(TAIL_KEY);
-        
-        if store.get(&head_key).await.expect("failed to get head").is_none() {
-            store.update(head_key, Value::Pointer(FixedBytes::new(2u64.to_be_bytes()))).await
+
+        if store
+            .get(&head_key)
+            .await
+            .expect("failed to get head")
+            .is_none()
+        {
+            store
+                .update(
+                    head_key,
+                    Value::Pointer(FixedBytes::new(2u64.to_be_bytes())),
+                )
+                .await
                 .expect("failed to initialize head pointer");
         }
-        
-        if store.get(&tail_key).await.expect("failed to get tail").is_none() {
-            store.update(tail_key, Value::Pointer(FixedBytes::new(2u64.to_be_bytes()))).await
+
+        if store
+            .get(&tail_key)
+            .await
+            .expect("failed to get tail")
+            .is_none()
+        {
+            store
+                .update(
+                    tail_key,
+                    Value::Pointer(FixedBytes::new(2u64.to_be_bytes())),
+                )
+                .await
                 .expect("failed to initialize tail pointer");
         }
 
@@ -83,7 +117,9 @@ impl<E: Clock + Storage + Metrics, V: Codec + Read<Cfg = ()>> PersistentQueue<E,
 
         // Store the value at the tail position
         let value_key = FixedBytes::new(tail_value.to_be_bytes());
-        self.store.update(value_key, Value::Value(value)).await
+        self.store
+            .update(value_key, Value::Value(value))
+            .await
             .expect("failed to store value");
 
         // Increment tail pointer
@@ -102,10 +138,18 @@ impl<E: Clock + Storage + Metrics, V: Codec + Read<Cfg = ()>> PersistentQueue<E,
         }
 
         let value_key = FixedBytes::new(head_value.to_be_bytes());
-        if let Some(Value::Value(value)) = self.store.get(&value_key).await.expect("failed to get value") {
+        if let Some(Value::Value(value)) = self
+            .store
+            .get(&value_key)
+            .await
+            .expect("failed to get value")
+        {
             // Remove the value from storage
-            self.store.delete(value_key).await.expect("failed to delete value");
-            
+            self.store
+                .delete(value_key)
+                .await
+                .expect("failed to delete value");
+
             // Increment head pointer
             let new_head = head_value + 1;
 
@@ -136,8 +180,8 @@ impl<E: Clock + Storage + Metrics, V: Codec + Read<Cfg = ()>> PersistentQueue<E,
         (tail_value - head_value) as usize
     }
 
-    pub async fn peek(&self) -> Option<V> 
-    where 
+    pub async fn peek(&self) -> Option<V>
+    where
         V: Clone,
     {
         let head_value = self.get_head_value().await;
@@ -150,7 +194,12 @@ impl<E: Clock + Storage + Metrics, V: Codec + Read<Cfg = ()>> PersistentQueue<E,
 
         // Use get() to peek without removing
         let value_key = FixedBytes::new(head_value.to_be_bytes());
-        if let Some(Value::Value(value)) = self.store.get(&value_key).await.expect("failed to get value") {
+        if let Some(Value::Value(value)) = self
+            .store
+            .get(&value_key)
+            .await
+            .expect("failed to get value")
+        {
             Some(value.clone())
         } else {
             None
@@ -160,7 +209,7 @@ impl<E: Clock + Storage + Metrics, V: Codec + Read<Cfg = ()>> PersistentQueue<E,
 
 enum Value<V: Codec> {
     Pointer(FixedBytes<8>),
-    Value(V)
+    Value(V),
 }
 
 impl<V> EncodeSize for Value<V>
@@ -168,7 +217,8 @@ where
     V: Codec,
 {
     fn encode_size(&self) -> usize {
-        1 + match self { // +1 for the type tag byte
+        1 + match self {
+            // +1 for the type tag byte
             Self::Pointer(fb) => fb.encode_size(),
             Self::Value(v) => v.encode_size(),
         }
@@ -177,22 +227,16 @@ where
 
 impl<V> Read for Value<V>
 where
-    V: Codec + Read<Cfg = ()>
+    V: Codec + Read<Cfg = ()>,
 {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
         let value_type = buf.get_u8();
         match value_type {
-            0x00 => {
-                Ok(Self::Pointer(FixedBytes::<8>::read_cfg(buf, &())?))
-            }
-            0x01 => {
-                Ok(Self::Value(V::read_cfg(buf, &())?))
-            }
-            byte => {
-                Err(Error::InvalidVarint(byte as usize))
-            }
+            0x00 => Ok(Self::Pointer(FixedBytes::<8>::read_cfg(buf, &())?)),
+            0x01 => Ok(Self::Value(V::read_cfg(buf, &())?)),
+            byte => Err(Error::InvalidVarint(byte as usize)),
         }
     }
 }
@@ -206,11 +250,11 @@ where
             Self::Pointer(fb) => {
                 buf.put_u8(0x00);
                 fb.write(buf);
-            },
+            }
             Self::Value(v) => {
                 buf.put_u8(0x01);
                 v.write(buf);
-            },
+            }
         }
     }
 }
@@ -218,18 +262,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{
-        Runner as _,
-        deterministic::Runner,
-    };
+    use commonware_runtime::{Runner as _, deterministic::Runner};
 
     async fn create_test_queue_with_context<E: Clock + Storage + Metrics>(
         partition: &str,
         context: E,
     ) -> PersistentQueue<E, u32> {
-        use commonware_utils::{NZUsize, NZU64};
         use commonware_runtime::buffer::PoolRef;
-        
+        use commonware_utils::{NZU64, NZUsize};
+
         let config = Config {
             log_journal_partition: format!("{}-log", partition),
             log_write_buffer: NZUsize!(64 * 1024),
@@ -479,66 +520,66 @@ mod tests {
     fn test_persistence_across_recreations() {
         use commonware_runtime::tokio;
         use std::{env, fs};
-        
+
         let db_path = env::temp_dir().join("persistent_queue_test_unique");
-        
+
         // Clean up any existing data
         if db_path.exists() {
             fs::remove_dir_all(&db_path).ok();
         }
-        
+
         // First phase: Create queue, add data, and close
         {
-            let cfg = tokio::Config::default()
-                .with_storage_directory(db_path.clone());
+            let cfg = tokio::Config::default().with_storage_directory(db_path.clone());
             let executor = tokio::Runner::new(cfg);
-            
+
             executor.start(|context| async move {
-                let mut queue = create_test_queue_with_context("test_persistence_unique", context).await;
-                
+                let mut queue =
+                    create_test_queue_with_context("test_persistence_unique", context).await;
+
                 // Add some test data
                 queue.push(100).await;
                 queue.push(200).await;
                 queue.push(300).await;
-                
+
                 // Verify data is there
                 assert_eq!(queue.len().await, 3);
                 assert_eq!(queue.peek().await, Some(100));
                 assert!(!queue.is_empty().await);
-                
+
                 // Pop one item to change the head pointer
                 assert_eq!(queue.pop().await, Some(100));
                 assert_eq!(queue.len().await, 2);
             });
         } // Database closes here when executor drops
-        
+
         // Second phase: Recreate queue with same path and verify data persists
         {
-            let cfg = tokio::Config::default()
-                .with_storage_directory(db_path.clone());
+            let cfg = tokio::Config::default().with_storage_directory(db_path.clone());
             let executor = tokio::Runner::new(cfg);
-            
+
             executor.start(|context| async move {
-                let mut queue = create_test_queue_with_context("test_persistence_unique", context).await;
-                
+                let mut queue =
+                    create_test_queue_with_context("test_persistence_unique", context).await;
+
                 // Verify persisted data is still there
                 assert_eq!(queue.len().await, 2);
                 assert!(!queue.is_empty().await);
                 assert_eq!(queue.peek().await, Some(200));
-                
+
                 // Pop remaining items to verify queue state
                 assert_eq!(queue.pop().await, Some(200));
                 assert_eq!(queue.pop().await, Some(300));
                 assert!(queue.is_empty().await);
                 assert_eq!(queue.len().await, 0);
-                
+
                 // Add new data to verify queue still works
                 queue.push(999).await;
                 assert_eq!(queue.peek().await, Some(999));
                 assert_eq!(queue.len().await, 1);
             });
         }
-        
+
         // Clean up test data
         if db_path.exists() {
             fs::remove_dir_all(&db_path).ok();
