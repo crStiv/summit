@@ -25,6 +25,7 @@ alloy-provider.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-transport-http.workspace = true
 alloy-rpc-client.workspace = true
+alloy-eips.workspace = true
 governor.workspace = true
 tower.workspace = true
 rand.workspace = true
@@ -36,6 +37,7 @@ metrics = { version = "0.24.0", optional = true }
 
 [dev-dependencies]
 alloy-primitives.workspace = true
+alloy-eips.workspace = true
 
 [features]
 prom = ["metrics"]

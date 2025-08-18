@@ -1,3 +1,4 @@
+use alloy_eips::eip4895::Withdrawal;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, Write};
 use commonware_runtime::{Clock, Metrics, Storage};
@@ -6,6 +7,7 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::sequence::FixedBytes;
 pub use store::Config;
 use summit_types::execution_request::{DepositRequest, WithdrawalRequest};
+use summit_types::withdrawal::PendingWithdrawal;
 
 // Key prefixes for different data types
 const STATE_PREFIX: u8 = 0x01;
@@ -21,6 +23,7 @@ const WITHDRAWAL_TAIL_KEY: [u8; 9] = [WITHDRAWAL_QUEUE_PREFIX, 0, 0, 0, 0, 0, 0,
 
 // State variable keys
 const LATEST_HEIGHT_KEY: [u8; 2] = [STATE_PREFIX, 0];
+const NEXT_WITHDRAWAL_INDEX_KEY: [u8; 2] = [STATE_PREFIX, 1];
 
 pub struct FinalizerState<E: Clock + Storage + Metrics> {
     store: Store<E, FixedBytes<64>, Value, TwoCap>,
@@ -38,29 +41,86 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
         let withdrawal_head_key = Self::pad_key(&WITHDRAWAL_HEAD_KEY);
         let withdrawal_tail_key = Self::pad_key(&WITHDRAWAL_TAIL_KEY);
         let latest_height_key = Self::pad_key(&LATEST_HEIGHT_KEY);
+        let next_withdrawal_index_key = Self::pad_key(&NEXT_WITHDRAWAL_INDEX_KEY);
 
         // Initialize deposit queue pointers
-        if store.get(&deposit_head_key).await.expect("failed to get deposit head").is_none() {
-            store.update(deposit_head_key, Value::U64(2)).await.expect("failed to initialize deposit head");
+        if store
+            .get(&deposit_head_key)
+            .await
+            .expect("failed to get deposit head")
+            .is_none()
+        {
+            store
+                .update(deposit_head_key, Value::U64(2))
+                .await
+                .expect("failed to initialize deposit head");
         }
-        if store.get(&deposit_tail_key).await.expect("failed to get deposit tail").is_none() {
-            store.update(deposit_tail_key, Value::U64(2)).await.expect("failed to initialize deposit tail");
+        if store
+            .get(&deposit_tail_key)
+            .await
+            .expect("failed to get deposit tail")
+            .is_none()
+        {
+            store
+                .update(deposit_tail_key, Value::U64(2))
+                .await
+                .expect("failed to initialize deposit tail");
         }
 
         // Initialize withdrawal queue pointers
-        if store.get(&withdrawal_head_key).await.expect("failed to get withdrawal head").is_none() {
-            store.update(withdrawal_head_key, Value::U64(2)).await.expect("failed to initialize withdrawal head");
+        if store
+            .get(&withdrawal_head_key)
+            .await
+            .expect("failed to get withdrawal head")
+            .is_none()
+        {
+            store
+                .update(withdrawal_head_key, Value::U64(2))
+                .await
+                .expect("failed to initialize withdrawal head");
         }
-        if store.get(&withdrawal_tail_key).await.expect("failed to get withdrawal tail").is_none() {
-            store.update(withdrawal_tail_key, Value::U64(2)).await.expect("failed to initialize withdrawal tail");
+        if store
+            .get(&withdrawal_tail_key)
+            .await
+            .expect("failed to get withdrawal tail")
+            .is_none()
+        {
+            store
+                .update(withdrawal_tail_key, Value::U64(2))
+                .await
+                .expect("failed to initialize withdrawal tail");
         }
 
         // Initialize latest height
-        if store.get(&latest_height_key).await.expect("failed to get latest height").is_none() {
-            store.update(latest_height_key, Value::U64(0)).await.expect("failed to initialize latest height");
+        if store
+            .get(&latest_height_key)
+            .await
+            .expect("failed to get latest height")
+            .is_none()
+        {
+            store
+                .update(latest_height_key, Value::U64(0))
+                .await
+                .expect("failed to initialize latest height");
         }
 
-        store.commit().await.expect("failed to commit initialization");
+        // Initialize next withdrawal index
+        if store
+            .get(&next_withdrawal_index_key)
+            .await
+            .expect("failed to get next withdrawal index")
+            .is_none()
+        {
+            store
+                .update(next_withdrawal_index_key, Value::U64(0))
+                .await
+                .expect("failed to initialize next withdrawal index");
+        }
+
+        store
+            .commit()
+            .await
+            .expect("failed to commit initialization");
 
         Self { store }
     }
@@ -89,7 +149,12 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
     // State variables operations
     pub async fn get_latest_height(&self) -> u64 {
         let key = Self::pad_key(&LATEST_HEIGHT_KEY);
-        if let Some(Value::U64(height)) = self.store.get(&key).await.expect("failed to get latest height") {
+        if let Some(Value::U64(height)) = self
+            .store
+            .get(&key)
+            .await
+            .expect("failed to get latest height")
+        {
             height
         } else {
             0
@@ -98,15 +163,42 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
     pub async fn set_latest_height(&mut self, height: u64) {
         let key = Self::pad_key(&LATEST_HEIGHT_KEY);
-        self.store.update(key, Value::U64(height)).await.expect("failed to set latest height");
-        self.store.commit().await.expect("failed to commit latest height");
+        self.store
+            .update(key, Value::U64(height))
+            .await
+            .expect("failed to set latest height");
+        self.store
+            .commit()
+            .await
+            .expect("failed to commit latest height");
+    }
+
+    async fn get_and_increment_withdrawal_index(&mut self) -> u64 {
+        let key = Self::pad_key(&NEXT_WITHDRAWAL_INDEX_KEY);
+        let current = if let Some(Value::U64(index)) = self
+            .store
+            .get(&key)
+            .await
+            .expect("failed to get withdrawal index")
+        {
+            index
+        } else {
+            0
+        };
+        self.store
+            .update(key, Value::U64(current + 1))
+            .await
+            .expect("failed to update withdrawal index");
+        current
     }
 
     // Account operations
     pub async fn get_account(&self, pubkey: &[u8; 48]) -> Option<DepositRequest> {
         let key = Self::make_account_key(pubkey);
-        
-        if let Some(Value::DepositRequest(account)) = self.store.get(&key).await.expect("failed to get account") {
+
+        if let Some(Value::DepositRequest(account)) =
+            self.store.get(&key).await.expect("failed to get account")
+        {
             Some(account)
         } else {
             None
@@ -115,15 +207,22 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
     pub async fn set_account(&mut self, pubkey: &[u8; 48], account: DepositRequest) {
         let key = Self::make_account_key(pubkey);
-        
-        self.store.update(key, Value::DepositRequest(account)).await.expect("failed to set account");
-        self.store.commit().await.expect("failed to commit account");
+
+        self.store
+            .update(key, Value::DepositRequest(account))
+            .await
+            .expect("failed to set account");
     }
 
     // Deposit queue operations
     async fn get_deposit_head(&self) -> u64 {
         let key = Self::pad_key(&DEPOSIT_HEAD_KEY);
-        if let Some(Value::U64(head)) = self.store.get(&key).await.expect("failed to get deposit head") {
+        if let Some(Value::U64(head)) = self
+            .store
+            .get(&key)
+            .await
+            .expect("failed to get deposit head")
+        {
             head
         } else {
             2 // Default starting position
@@ -132,7 +231,12 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
     async fn get_deposit_tail(&self) -> u64 {
         let key = Self::pad_key(&DEPOSIT_TAIL_KEY);
-        if let Some(Value::U64(tail)) = self.store.get(&key).await.expect("failed to get deposit tail") {
+        if let Some(Value::U64(tail)) = self
+            .store
+            .get(&key)
+            .await
+            .expect("failed to get deposit tail")
+        {
             tail
         } else {
             2 // Default starting position
@@ -141,12 +245,18 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
     async fn update_deposit_head(&mut self, value: u64) {
         let key = Self::pad_key(&DEPOSIT_HEAD_KEY);
-        self.store.update(key, Value::U64(value)).await.expect("failed to update deposit head");
+        self.store
+            .update(key, Value::U64(value))
+            .await
+            .expect("failed to update deposit head");
     }
 
     async fn update_deposit_tail(&mut self, value: u64) {
         let key = Self::pad_key(&DEPOSIT_TAIL_KEY);
-        self.store.update(key, Value::U64(value)).await.expect("failed to update deposit tail");
+        self.store
+            .update(key, Value::U64(value))
+            .await
+            .expect("failed to update deposit tail");
     }
 
     pub async fn push_deposit(&mut self, request: DepositRequest) {
@@ -154,12 +264,14 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
         let key = Self::make_queue_key(DEPOSIT_QUEUE_PREFIX, tail_value);
 
-        self.store.update(key, Value::DepositRequest(request)).await.expect("failed to store deposit");
+        self.store
+            .update(key, Value::DepositRequest(request))
+            .await
+            .expect("failed to store deposit");
         self.update_deposit_tail(tail_value + 1).await;
-        self.store.commit().await.expect("failed to commit deposit push");
     }
 
-    pub async fn peek_deposit(&self) -> Option<DepositRequest> 
+    pub async fn peek_deposit(&self) -> Option<DepositRequest>
     where
         DepositRequest: Clone,
     {
@@ -172,7 +284,9 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
         let key = Self::make_queue_key(DEPOSIT_QUEUE_PREFIX, head_value);
 
-        if let Some(Value::DepositRequest(request)) = self.store.get(&key).await.expect("failed to peek deposit") {
+        if let Some(Value::DepositRequest(request)) =
+            self.store.get(&key).await.expect("failed to peek deposit")
+        {
             Some(request.clone())
         } else {
             None
@@ -189,15 +303,20 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
         let key = Self::make_queue_key(DEPOSIT_QUEUE_PREFIX, head_value);
 
-        let result = if let Some(Value::DepositRequest(request)) = self.store.get(&key).await.expect("failed to get deposit") {
+        let result = if let Some(Value::DepositRequest(request)) =
+            self.store.get(&key).await.expect("failed to get deposit")
+        {
             Some(request)
         } else {
             None
         };
 
         if result.is_some() {
-            self.store.delete(key).await.expect("failed to delete deposit");
-            
+            self.store
+                .delete(key)
+                .await
+                .expect("failed to delete deposit");
+
             let new_head = head_value + 1;
             if new_head == tail_value {
                 // Queue becomes empty, reset pointers
@@ -206,8 +325,8 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
             } else {
                 self.update_deposit_head(new_head).await;
             }
-            
-            self.store.commit().await.expect("failed to commit deposit pop");
+
+            //self.store.commit().await.expect("failed to commit deposit pop");
         }
 
         result
@@ -216,7 +335,12 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
     // Withdrawal queue operations (similar to deposit queue)
     async fn get_withdrawal_head(&self) -> u64 {
         let key = Self::pad_key(&WITHDRAWAL_HEAD_KEY);
-        if let Some(Value::U64(head)) = self.store.get(&key).await.expect("failed to get withdrawal head") {
+        if let Some(Value::U64(head)) = self
+            .store
+            .get(&key)
+            .await
+            .expect("failed to get withdrawal head")
+        {
             head
         } else {
             2
@@ -225,7 +349,12 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
     async fn get_withdrawal_tail(&self) -> u64 {
         let key = Self::pad_key(&WITHDRAWAL_TAIL_KEY);
-        if let Some(Value::U64(tail)) = self.store.get(&key).await.expect("failed to get withdrawal tail") {
+        if let Some(Value::U64(tail)) = self
+            .store
+            .get(&key)
+            .await
+            .expect("failed to get withdrawal tail")
+        {
             tail
         } else {
             2
@@ -234,27 +363,57 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
     async fn update_withdrawal_head(&mut self, value: u64) {
         let key = Self::pad_key(&WITHDRAWAL_HEAD_KEY);
-        self.store.update(key, Value::U64(value)).await.expect("failed to update withdrawal head");
+        self.store
+            .update(key, Value::U64(value))
+            .await
+            .expect("failed to update withdrawal head");
     }
 
     async fn update_withdrawal_tail(&mut self, value: u64) {
         let key = Self::pad_key(&WITHDRAWAL_TAIL_KEY);
-        self.store.update(key, Value::U64(value)).await.expect("failed to update withdrawal tail");
+        self.store
+            .update(key, Value::U64(value))
+            .await
+            .expect("failed to update withdrawal tail");
     }
 
-    pub async fn push_withdrawal(&mut self, request: WithdrawalRequest) {
+    pub async fn push_withdrawal_request(
+        &mut self,
+        request: WithdrawalRequest,
+        withdrawal_height: u64,
+    ) {
+        // Get the next unique withdrawal index
+        let withdrawal_index = self.get_and_increment_withdrawal_index().await;
+
+        // Convert WithdrawalRequest to PendingWithdrawal
+        let pending_withdrawal = PendingWithdrawal {
+            inner: Withdrawal {
+                index: withdrawal_index,
+                validator_index: 0, // TODO: Map validator_pubkey to validator_index if needed
+                address: request.source_address,
+                amount: request.amount,
+            },
+            withdrawal_height,
+        };
+
+        self.push_withdrawal(pending_withdrawal).await;
+    }
+
+    pub async fn push_withdrawal(&mut self, request: PendingWithdrawal) {
         let tail_value = self.get_withdrawal_tail().await;
 
         let key = Self::make_queue_key(WITHDRAWAL_QUEUE_PREFIX, tail_value);
 
-        self.store.update(key, Value::WithdrawalRequest(request)).await.expect("failed to store withdrawal");
+        self.store
+            .update(key, Value::PendingWithdrawal(request))
+            .await
+            .expect("failed to store withdrawal");
         self.update_withdrawal_tail(tail_value + 1).await;
-        self.store.commit().await.expect("failed to commit withdrawal push");
     }
 
-    pub async fn peek_withdrawal(&self) -> Option<WithdrawalRequest>
+    pub async fn peek_withdrawal(&self) -> Option<PendingWithdrawal>
     where
-        WithdrawalRequest: Clone,
+        PendingWithdrawal: Clone,
     {
         let head_value = self.get_withdrawal_head().await;
         let tail_value = self.get_withdrawal_tail().await;
@@ -265,14 +424,19 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
         let key = Self::make_queue_key(WITHDRAWAL_QUEUE_PREFIX, head_value);
 
-        if let Some(Value::WithdrawalRequest(request)) = self.store.get(&key).await.expect("failed to peek withdrawal") {
+        if let Some(Value::PendingWithdrawal(request)) = self
+            .store
+            .get(&key)
+            .await
+            .expect("failed to peek withdrawal")
+        {
             Some(request.clone())
         } else {
             None
         }
     }
 
-    pub async fn pop_withdrawal(&mut self) -> Option<WithdrawalRequest> {
+    pub async fn pop_withdrawal(&mut self) -> Option<PendingWithdrawal> {
         let head_value = self.get_withdrawal_head().await;
         let tail_value = self.get_withdrawal_tail().await;
 
@@ -282,15 +446,23 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
         let key = Self::make_queue_key(WITHDRAWAL_QUEUE_PREFIX, head_value);
 
-        let result = if let Some(Value::WithdrawalRequest(request)) = self.store.get(&key).await.expect("failed to get withdrawal") {
+        let result = if let Some(Value::PendingWithdrawal(request)) = self
+            .store
+            .get(&key)
+            .await
+            .expect("failed to get withdrawal")
+        {
             Some(request)
         } else {
             None
         };
 
         if result.is_some() {
-            self.store.delete(key).await.expect("failed to delete withdrawal");
-            
+            self.store
+                .delete(key)
+                .await
+                .expect("failed to delete withdrawal");
+
             let new_head = head_value + 1;
             if new_head == tail_value {
                 self.update_withdrawal_head(2).await;
@@ -298,8 +470,8 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
             } else {
                 self.update_withdrawal_head(new_head).await;
             }
-            
-            self.store.commit().await.expect("failed to commit withdrawal pop");
+
+            //self.store.commit().await.expect("failed to commit withdrawal pop");
         }
 
         result
@@ -310,7 +482,7 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 enum Value {
     U64(u64),
     DepositRequest(DepositRequest),
-    WithdrawalRequest(WithdrawalRequest),
+    PendingWithdrawal(PendingWithdrawal),
 }
 
 impl EncodeSize for Value {
@@ -318,7 +490,7 @@ impl EncodeSize for Value {
         1 + match self {
             Self::U64(_) => 8,
             Self::DepositRequest(req) => req.encode_size(),
-            Self::WithdrawalRequest(req) => req.encode_size(),
+            Self::PendingWithdrawal(req) => req.encode_size(),
         }
     }
 }
@@ -331,7 +503,10 @@ impl Read for Value {
         match value_type {
             0x01 => Ok(Self::U64(buf.get_u64())),
             0x02 => Ok(Self::DepositRequest(DepositRequest::read_cfg(buf, &())?)),
-            0x03 => Ok(Self::WithdrawalRequest(WithdrawalRequest::read_cfg(buf, &())?)),
+            0x03 => Ok(Self::PendingWithdrawal(PendingWithdrawal::read_cfg(
+                buf,
+                &(),
+            )?)),
             byte => Err(Error::InvalidVarint(byte as usize)),
         }
     }
@@ -348,7 +523,7 @@ impl Write for Value {
                 buf.put_u8(0x02);
                 req.write(buf);
             }
-            Self::WithdrawalRequest(req) => {
+            Self::PendingWithdrawal(req) => {
                 buf.put_u8(0x03);
                 req.write(buf);
             }
@@ -359,13 +534,15 @@ impl Write for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{Runner as _, deterministic::Runner};
-    use commonware_runtime::buffer::PoolRef;
-    use commonware_utils::{NZU64, NZUsize};
-    use summit_types::execution_request::{DepositRequest, WithdrawalRequest};
-    use summit_types::PublicKey;
+    use alloy_eips::eip4895::Withdrawal;
     use alloy_primitives::Address;
     use commonware_codec::DecodeExt;
+    use commonware_runtime::buffer::PoolRef;
+    use commonware_runtime::{Runner as _, deterministic::Runner};
+    use commonware_utils::{NZU64, NZUsize};
+    use summit_types::PublicKey;
+    use summit_types::execution_request::{DepositRequest, WithdrawalRequest};
+    use summit_types::withdrawal::PendingWithdrawal;
 
     async fn create_test_db_with_context<E: Clock + Storage + Metrics>(
         partition: &str,
@@ -398,11 +575,15 @@ mod tests {
         }
     }
 
-    fn create_test_withdrawal_request(index: u64, amount: u64) -> WithdrawalRequest {
-        WithdrawalRequest {
-            source_address: Address::from([index as u8; 20]),
-            validator_pubkey: [index as u8; 48],
-            amount,
+    fn create_test_withdrawal_request(index: u64, amount: u64) -> PendingWithdrawal {
+        PendingWithdrawal {
+            inner: Withdrawal {
+                index,
+                validator_index: index * 10, // Some different value
+                address: Address::from([index as u8; 20]),
+                amount,
+            },
+            withdrawal_height: index * 100, // Some height value
         }
     }
 
@@ -560,16 +741,16 @@ mod tests {
             // Peek should return first item
             let peeked = db.peek_withdrawal().await;
             assert!(peeked.is_some());
-            assert_eq!(peeked.unwrap().amount, 16000000000);
+            assert_eq!(peeked.unwrap().inner.amount, 16000000000);
 
             // Pop should return items in FIFO order
             let popped1 = db.pop_withdrawal().await;
             assert!(popped1.is_some());
-            assert_eq!(popped1.unwrap().amount, 16000000000);
+            assert_eq!(popped1.unwrap().inner.amount, 16000000000);
 
             let popped2 = db.pop_withdrawal().await;
             assert!(popped2.is_some());
-            assert_eq!(popped2.unwrap().amount, 24000000000);
+            assert_eq!(popped2.unwrap().inner.amount, 24000000000);
 
             // Queue should be empty
             assert!(db.peek_withdrawal().await.is_none());
@@ -601,7 +782,7 @@ mod tests {
 
             // Verify all operations work independently
             assert_eq!(db.get_latest_height().await, 100);
-            
+
             let account = db.get_account(&pubkey).await;
             assert!(account.is_some());
             assert_eq!(account.unwrap().amount, 32000000000);
@@ -612,7 +793,7 @@ mod tests {
 
             let withdrawal_peeked = db.peek_withdrawal().await;
             assert!(withdrawal_peeked.is_some());
-            assert_eq!(withdrawal_peeked.unwrap().amount, 16000000000);
+            assert_eq!(withdrawal_peeked.unwrap().inner.amount, 16000000000);
         });
     }
 
@@ -638,13 +819,15 @@ mod tests {
 
                 // Add test data
                 db.set_latest_height(42).await;
-                
+
                 let pubkey = [1u8; 48];
                 let deposit_req = create_test_deposit_request(1, 32000000000);
                 db.set_account(&pubkey, deposit_req.clone()).await;
-                
-                db.push_deposit(create_test_deposit_request(2, 16000000000)).await;
-                db.push_withdrawal(create_test_withdrawal_request(1, 8000000000)).await;
+
+                db.push_deposit(create_test_deposit_request(2, 16000000000))
+                    .await;
+                db.push_withdrawal(create_test_withdrawal_request(1, 8000000000))
+                    .await;
 
                 // Verify data is there
                 assert_eq!(db.get_latest_height().await, 42);
@@ -664,26 +847,26 @@ mod tests {
 
                 // Verify persisted data is still there
                 assert_eq!(db.get_latest_height().await, 42);
-                
+
                 let pubkey = [1u8; 48];
                 let account = db.get_account(&pubkey).await;
                 assert!(account.is_some());
                 assert_eq!(account.unwrap().amount, 32000000000);
-                
+
                 let deposit = db.peek_deposit().await;
                 assert!(deposit.is_some());
                 assert_eq!(deposit.unwrap().amount, 16000000000);
-                
+
                 let withdrawal = db.peek_withdrawal().await;
                 assert!(withdrawal.is_some());
-                assert_eq!(withdrawal.unwrap().amount, 8000000000);
+                assert_eq!(withdrawal.unwrap().inner.amount, 8000000000);
 
                 // Verify operations still work
                 db.set_latest_height(100).await;
                 assert_eq!(db.get_latest_height().await, 100);
-                
+
                 assert_eq!(db.pop_deposit().await.unwrap().amount, 16000000000);
-                assert_eq!(db.pop_withdrawal().await.unwrap().amount, 8000000000);
+                assert_eq!(db.pop_withdrawal().await.unwrap().inner.amount, 8000000000);
             });
         }
 

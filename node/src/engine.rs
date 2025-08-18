@@ -45,6 +45,7 @@ const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const VALIDATOR_ONBOARDING_INTERVAL: u64 = 10;
 const VALIDATOR_ONBOARDING_LIMIT_PER_BLOCK: usize = 3;
 const VALIDATOR_MINIMUM_STAKE: u64 = 32_000_000_000; // in gwei
+const VALIDATOR_WITHDRAWAL_PERIOD: u64 = 100;
 //
 
 pub struct Engine<
@@ -94,6 +95,7 @@ impl<
                 validator_onboarding_interval: VALIDATOR_ONBOARDING_INTERVAL,
                 validator_onboarding_limit_per_block: VALIDATOR_ONBOARDING_LIMIT_PER_BLOCK,
                 validator_minimum_stake: VALIDATOR_MINIMUM_STAKE,
+                validator_withdrawal_period: VALIDATOR_WITHDRAWAL_PERIOD,
             },
         )
         .await;

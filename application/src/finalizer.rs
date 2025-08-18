@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::Registry;
+use crate::db::FinalizerState;
 use crate::engine_client::EngineClient;
 use alloy_rpc_types_engine::ForkchoiceState;
 use commonware_consensus::Reporter;
@@ -23,9 +24,9 @@ use metrics::{counter, histogram};
 use rand::Rng;
 use summit_types::Block;
 use summit_types::execution_request::{DepositRequest, ExecutionRequest, WithdrawalRequest};
+use summit_types::withdrawal::PendingWithdrawal;
 use summit_utils::persistent_queue::{Config as PersistentQueueConfig, PersistentQueue};
 use tracing::{info, warn};
-use crate::db::FinalizerState;
 
 const LATEST_KEY: [u8; 1] = [0u8];
 const PAGE_SIZE: usize = 77;
@@ -42,7 +43,6 @@ pub struct Finalizer<
     height_notify_mailbox: mpsc::Receiver<(u64, oneshot::Sender<()>)>,
 
     //next_withdraw_request_mailbox: mpsc::Receiver<((), oneshot::Sender<()>)>,
-
     engine_client: C,
 
     registry: Registry,
@@ -53,8 +53,6 @@ pub struct Finalizer<
 
     state: FinalizerState<R>,
 
-    withdrawal_queue: PersistentQueue<R, WithdrawalRequest>,
-
     accounts: Metadata<R, FixedBytes<48>, DepositRequest>,
 
     validator_onboarding_interval: u64,
@@ -62,6 +60,8 @@ pub struct Finalizer<
     validator_onboarding_limit_per_block: usize,
 
     validator_minimum_stake: u64, // in gwei
+
+    validator_withdrawal_period: u64, // in blocks
 }
 
 impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient>
@@ -77,12 +77,12 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         validator_onboarding_interval: u64,
         validator_onboarding_limit_per_block: usize,
         validator_minimum_stake: u64,
+        validator_withdrawal_period: u64,
     ) -> (
         Self,
         FinalizerMailbox,
         mpsc::Sender<(u64, oneshot::Sender<()>)>,
     ) {
-
         let state_cfg = PersistentQueueConfig {
             log_journal_partition: format!("{db_prefix}-finalizer_state-log"),
             log_write_buffer: NZUsize!(64 * 1024),
@@ -95,25 +95,6 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
         let state = FinalizerState::new(context.with_label("finalizer_state"), state_cfg).await;
-
-        let withdrawal_queue_cfg = PersistentQueueConfig {
-            log_journal_partition: format!("{db_prefix}-finalizer_withdrawal_queue-log"),
-            log_write_buffer: NZUsize!(64 * 1024),
-            log_compression: None,
-            log_codec_config: (),
-            log_items_per_section: NZU64!(4),
-            locations_journal_partition: format!(
-                "{db_prefix}-finalizer_withdrawal_queue-locations"
-            ),
-            locations_items_per_blob: NZU64!(4),
-            translator: TwoCap,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-        };
-        let withdrawal_queue = PersistentQueue::<R, WithdrawalRequest>::new(
-            context.with_label("finalizer_withdrawal_queue"),
-            withdrawal_queue_cfg,
-        )
-        .await;
 
         let accounts: Metadata<R, FixedBytes<48>, DepositRequest> = Metadata::init(
             context.with_label("finalizer_accounts"),
@@ -139,11 +120,11 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 forkchoice,
                 rx_finalizer_mailbox,
                 state,
-                withdrawal_queue,
                 accounts,
                 validator_onboarding_interval,
                 validator_onboarding_limit_per_block,
                 validator_minimum_stake,
+                validator_withdrawal_period,
             },
             FinalizerMailbox::new(tx_finalizer),
             tx_height_notify,
@@ -214,7 +195,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                                 self.state.push_deposit(deposit_request).await;
                                             }
                                             ExecutionRequest::Withdrawal(withdrawal_request) => {
-                                                self.withdrawal_queue.push(withdrawal_request).await;
+                                                self.state.push_withdrawal_request(withdrawal_request, new_height + self.validator_withdrawal_period).await;
                                             }
                                         }
                                     }
@@ -264,6 +245,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                             info!(new_height, "finalized block");
                         }
 
+                        // This will commit all changes to the state db
                         self.state.set_latest_height(new_height).await;
                         self.height_notifier.notify_up_to(new_height);
                         let _ = notifier.send(());
