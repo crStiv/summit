@@ -5035,11 +5035,13 @@ dependencies = [
 name = "summit-application"
 version = "0.0.0"
 dependencies = [
+ "alloy-primitives",
  "alloy-provider",
  "alloy-rpc-client",
  "alloy-rpc-types-engine",
  "alloy-transport-http",
  "anyhow",
+ "bytes",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
