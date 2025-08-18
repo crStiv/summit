@@ -6,17 +6,18 @@ use commonware_codec::{Error, FixedSize, Read, Write};
 #[derive(Debug, Clone, PartialEq)]
 pub struct WithdrawalWrapper {
     pub inner: Withdrawal,
+    pub withdrawal_height: u64,
 }
 
 impl TryFrom<&[u8]> for WithdrawalWrapper {
     type Error = &'static str;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        // EIP-4895: Withdrawal data is exactly 44 bytes
-        // Format: index(8) + validator_index(8) + address(20) + amount(8) = 44 bytes
+        // WithdrawalWrapper data is exactly 52 bytes
+        // Format: index(8) + validator_index(8) + address(20) + amount(8) + withdrawal_height(8) = 52 bytes
 
-        if bytes.len() != 44 {
-            return Err("WithdrawalWrapper must be exactly 44 bytes");
+        if bytes.len() != 52 {
+            return Err("WithdrawalWrapper must be exactly 52 bytes");
         }
 
         // Extract index (8 bytes, little-endian u64)
@@ -43,6 +44,12 @@ impl TryFrom<&[u8]> for WithdrawalWrapper {
             .map_err(|_| "Failed to parse amount")?;
         let amount = u64::from_le_bytes(amount_bytes);
 
+        // Extract withdrawal_height (8 bytes, little-endian u64)
+        let withdrawal_height_bytes: [u8; 8] = bytes[44..52]
+            .try_into()
+            .map_err(|_| "Failed to parse withdrawal_height")?;
+        let withdrawal_height = u64::from_le_bytes(withdrawal_height_bytes);
+
         Ok(WithdrawalWrapper {
             inner: Withdrawal {
                 index,
@@ -50,6 +57,7 @@ impl TryFrom<&[u8]> for WithdrawalWrapper {
                 address,
                 amount,
             },
+            withdrawal_height,
         })
     }
 }
@@ -60,18 +68,19 @@ impl Write for WithdrawalWrapper {
         buf.put(&self.inner.validator_index.to_le_bytes()[..]);
         buf.put(&self.inner.address.0[..]);
         buf.put(&self.inner.amount.to_le_bytes()[..]);
+        buf.put(&self.withdrawal_height.to_le_bytes()[..]);
     }
 }
 
 impl FixedSize for WithdrawalWrapper {
-    const SIZE: usize = 44; // 8 + 8 + 20 + 8
+    const SIZE: usize = 52; // 8 + 8 + 20 + 8 + 8 (added withdrawal_height)
 }
 
 impl Read for WithdrawalWrapper {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
-        if buf.remaining() < 44 {
+        if buf.remaining() < 52 {
             return Err(Error::Invalid("WithdrawalWrapper", "Insufficient bytes"));
         }
 
@@ -91,6 +100,10 @@ impl Read for WithdrawalWrapper {
         buf.copy_to_slice(&mut amount_bytes);
         let amount = u64::from_le_bytes(amount_bytes);
 
+        let mut withdrawal_height_bytes = [0u8; 8];
+        buf.copy_to_slice(&mut withdrawal_height_bytes);
+        let withdrawal_height = u64::from_le_bytes(withdrawal_height_bytes);
+
         Ok(WithdrawalWrapper {
             inner: Withdrawal {
                 index,
@@ -98,6 +111,7 @@ impl Read for WithdrawalWrapper {
                 address,
                 amount,
             },
+            withdrawal_height,
         })
     }
 }
@@ -117,12 +131,13 @@ mod tests {
                 address: Address::from([1u8; 20]),
                 amount: 16000000000u64, // 16 ETH in gwei
             },
+            withdrawal_height: 100,
         };
 
         // Test Write
         let mut buf = BytesMut::new();
         withdrawal.write(&mut buf);
-        assert_eq!(buf.len(), 44); // 8 + 8 + 20 + 8
+        assert_eq!(buf.len(), 52); // 8 + 8 + 20 + 8 + 8
 
         // Test Read
         let decoded = WithdrawalWrapper::read(&mut buf.as_ref()).unwrap();
@@ -138,6 +153,7 @@ mod tests {
                 address: Address::from([2u8; 20]),
                 amount: 32000000000u64, // 32 ETH in gwei
             },
+            withdrawal_height: 200,
         };
 
         // Encode with Write
@@ -152,7 +168,7 @@ mod tests {
     #[test]
     fn test_withdrawal_wrapper_insufficient_bytes() {
         let mut buf = BytesMut::new();
-        buf.put(&[0u8; 43][..]); // One byte short
+        buf.put(&[0u8; 51][..]); // One byte short
 
         let result = WithdrawalWrapper::read(&mut buf.as_ref());
         assert!(result.is_err());
@@ -166,18 +182,18 @@ mod tests {
 
     #[test]
     fn test_withdrawal_wrapper_try_from_insufficient_bytes() {
-        let buf = [0u8; 43]; // One byte short
+        let buf = [0u8; 51]; // One byte short
         let result = WithdrawalWrapper::try_from(buf.as_ref());
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "WithdrawalWrapper must be exactly 44 bytes");
+        assert_eq!(result.unwrap_err(), "WithdrawalWrapper must be exactly 52 bytes");
     }
 
     #[test]
     fn test_withdrawal_wrapper_try_from_too_many_bytes() {
-        let buf = [0u8; 45]; // One byte too many
+        let buf = [0u8; 53]; // One byte too many
         let result = WithdrawalWrapper::try_from(buf.as_ref());
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "WithdrawalWrapper must be exactly 44 bytes");
+        assert_eq!(result.unwrap_err(), "WithdrawalWrapper must be exactly 52 bytes");
     }
 
     #[test]
@@ -190,6 +206,7 @@ mod tests {
                 address: Address::from([3u8; 20]),
                 amount: 64000000000u64, // 64 ETH in gwei
             },
+            withdrawal_height: 300,
         };
 
         // Encode with Codec
@@ -208,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_withdrawal_wrapper_fixed_size() {
-        assert_eq!(WithdrawalWrapper::SIZE, 44);
+        assert_eq!(WithdrawalWrapper::SIZE, 52);
         
         let withdrawal = WithdrawalWrapper {
             inner: Withdrawal {
@@ -217,6 +234,7 @@ mod tests {
                 address: Address::ZERO,
                 amount: 0,
             },
+            withdrawal_height: 0,
         };
         
         let mut buf = BytesMut::new();
@@ -238,6 +256,7 @@ mod tests {
                 ]),
                 amount: 0xa1b2c3d4e5f60708u64,
             },
+            withdrawal_height: 500,
         };
 
         let mut buf = BytesMut::new();
@@ -258,8 +277,11 @@ mod tests {
             0x01, 0x02, 0x03, 0x04
         ]);
         
-        // Check amount (last 8 bytes, little-endian)
+        // Check amount (next 8 bytes, little-endian)
         assert_eq!(&bytes[36..44], &0xa1b2c3d4e5f60708u64.to_le_bytes());
+        
+        // Check withdrawal_height (last 8 bytes, little-endian)
+        assert_eq!(&bytes[44..52], &500u64.to_le_bytes());
         
         // Verify roundtrip
         let decoded = WithdrawalWrapper::read(&mut buf.as_ref()).unwrap();

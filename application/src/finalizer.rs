@@ -25,6 +25,7 @@ use summit_types::Block;
 use summit_types::execution_request::{DepositRequest, ExecutionRequest, WithdrawalRequest};
 use summit_utils::persistent_queue::{Config as PersistentQueueConfig, PersistentQueue};
 use tracing::{info, warn};
+use crate::db::FinalizerState;
 
 const LATEST_KEY: [u8; 1] = [0u8];
 const PAGE_SIZE: usize = 77;
@@ -50,13 +51,11 @@ pub struct Finalizer<
 
     rx_finalizer_mailbox: mpsc::Receiver<(Block, oneshot::Sender<()>)>,
 
-    deposit_queue: PersistentQueue<R, DepositRequest>,
+    state: FinalizerState<R>,
 
     withdrawal_queue: PersistentQueue<R, WithdrawalRequest>,
 
     accounts: Metadata<R, FixedBytes<48>, DepositRequest>,
-
-    state_variables: Metadata<R, FixedBytes<1>, u64>,
 
     validator_onboarding_interval: u64,
 
@@ -83,22 +82,19 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         FinalizerMailbox,
         mpsc::Sender<(u64, oneshot::Sender<()>)>,
     ) {
-        let deposit_queue_cfg = PersistentQueueConfig {
-            log_journal_partition: format!("{db_prefix}-finalizer_deposit_queue-log"),
+
+        let state_cfg = PersistentQueueConfig {
+            log_journal_partition: format!("{db_prefix}-finalizer_state-log"),
             log_write_buffer: NZUsize!(64 * 1024),
             log_compression: None,
             log_codec_config: (),
             log_items_per_section: NZU64!(4),
-            locations_journal_partition: format!("{db_prefix}-finalizer_deposit_queue-locations"),
+            locations_journal_partition: format!("{db_prefix}-finalizer_state-locations"),
             locations_items_per_blob: NZU64!(4),
             translator: TwoCap,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
-        let deposit_queue = PersistentQueue::<R, DepositRequest>::new(
-            context.with_label("finalizer_deposit_queue"),
-            deposit_queue_cfg,
-        )
-        .await;
+        let state = FinalizerState::new(context.with_label("finalizer_state"), state_cfg).await;
 
         let withdrawal_queue_cfg = PersistentQueueConfig {
             log_journal_partition: format!("{db_prefix}-finalizer_withdrawal_queue-log"),
@@ -129,16 +125,6 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         .await
         .expect("failed to initialize account metadata");
 
-        let state_variables: Metadata<R, FixedBytes<1>, u64> = Metadata::init(
-            context.with_label("finalizer_state"),
-            Config {
-                partition: format!("{db_prefix}-finalizer_state"),
-                codec_config: (),
-            },
-        )
-        .await
-        .expect("failed to initialize state variables metadata");
-
         let (tx_height_notify, height_notify_mailbox) = mpsc::channel(1000);
 
         let (tx_finalizer, rx_finalizer_mailbox) = mpsc::channel(1); // todo(dalton) there should only ever be one message in this channel since we block but lets verify this
@@ -152,10 +138,9 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 registry,
                 forkchoice,
                 rx_finalizer_mailbox,
-                deposit_queue,
+                state,
                 withdrawal_queue,
                 accounts,
-                state_variables,
                 validator_onboarding_interval,
                 validator_onboarding_limit_per_block,
                 validator_minimum_stake,
@@ -174,7 +159,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                     mail = self.height_notify_mailbox.next() => {
                         let (height, sender) = mail.expect("height notify mailbox dropped");
 
-                        let last_indexed = *self.state_variables.get(&FixedBytes::new(LATEST_KEY)).unwrap_or(&0);
+                        let last_indexed = self.state.get_latest_height().await;
                         if last_indexed >= height {
                             let _ = sender.send(());
                             continue;
@@ -226,7 +211,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                     Ok(execution_request) => {
                                         match execution_request {
                                             ExecutionRequest::Deposit(deposit_request) => {
-                                                self.deposit_queue.push(deposit_request).await;
+                                                self.state.push_deposit(deposit_request).await;
                                             }
                                             ExecutionRequest::Withdrawal(withdrawal_request) => {
                                                 self.withdrawal_queue.push(withdrawal_request).await;
@@ -240,10 +225,10 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                             }
 
                             // Add validators that deposited to the validator set
-                            let last_indexed = *self.state_variables.get(&FixedBytes::new(LATEST_KEY)).unwrap_or(&0);
+                            let last_indexed = self.state.get_latest_height().await;
                             if last_indexed % self.validator_onboarding_interval == 0 {
                                 for _ in 0..self.validator_onboarding_limit_per_block {
-                                    if let Some(request) = self.deposit_queue.peek().await {
+                                    if let Some(request) = self.state.peek_deposit().await {
                                         let mut validator_balance = 0;
                                         if let Some(account) = self.accounts.get_mut(&FixedBytes::new(request.bls_pubkey)) {
                                             // Since we only remove the request from the queue after processing it,
@@ -267,7 +252,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                         }
 
                                         // Only remove the request from the queue after we processed and stored it
-                                        let _ = self.deposit_queue.pop().await;
+                                        let _ = self.state.pop_deposit().await;
                                     }
 
                                 }
@@ -279,7 +264,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                             info!(new_height, "finalized block");
                         }
 
-                        self.state_variables.put(FixedBytes::new(LATEST_KEY), new_height);
+                        self.state.set_latest_height(new_height).await;
                         self.height_notifier.notify_up_to(new_height);
                         let _ = notifier.send(());
                     },
