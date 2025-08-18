@@ -306,5 +306,8 @@ fn handle_verify(block: &Block, parent: Block) -> bool {
     if block.timestamp <= parent.timestamp {
         return false;
     }
+
+    // TODO(matthias): verify withdrawals
+
     true
 }

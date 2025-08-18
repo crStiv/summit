@@ -255,8 +255,16 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                         // Only remove the request from the queue after we processed and stored it
                                         let _ = self.state.pop_deposit().await;
                                     }
-
                                 }
+                            }
+
+                            // Remove pending withdrawals are included in the committed block
+                            for withdrawal in block.payload.payload_inner.withdrawals {
+                                let pending_withdrawal = self.state.pop_withdrawal().await;
+                                // TODO(matthias): these checks should never fail. we have to make sure that these withdrawals are
+                                // verified when the block is verified. it is too late when the block is committed.
+                                let pending_withdrawal = pending_withdrawal.expect("pending withdrawal must be in state");
+                                assert_eq!(pending_withdrawal.inner, withdrawal);
                             }
 
                             // TODO(matthias): verify what happens if the binary shuts down before storing the deposits to disk.
