@@ -406,6 +406,26 @@ impl MockEngineNetwork {
         clients.clone()
     }
 
+    /// Print all canonical chains for debugging consensus issues
+    fn print_all_canonical_chains(&self, until_block: Option<u64>, error_type: &str) {
+        let clients = self.get_clients();
+        println!("=== CONSENSUS ERROR: {} ===", error_type);
+        for client in &clients {
+            let chain = client.get_canonical_chain();
+            let height = until_block.unwrap_or(client.get_chain_height());
+            println!("Client {}: height={}", client.client_id(), height);
+            for (block_number, block_hash) in &chain {
+                if until_block.is_none() || *block_number <= height {
+                    println!(
+                        "  Block {}: {}",
+                        block_number,
+                        hex::encode(block_hash.as_slice())
+                    );
+                }
+            }
+        }
+    }
+
     /// Check if all clients have the same canonical chain (consensus)
     pub fn verify_consensus(&self, until_block: Option<u64>) -> Result<(), String> {
         let clients = self.get_clients();
@@ -422,6 +442,7 @@ impl MockEngineNetwork {
             let client_height = until_block.unwrap_or(client.get_chain_height());
 
             if client_height != reference_height {
+                self.print_all_canonical_chains(until_block, "HEIGHT MISMATCH");
                 return Err(format!(
                     "Height mismatch: {} has {}, {} has {}",
                     clients[0].client_id(),
@@ -432,6 +453,7 @@ impl MockEngineNetwork {
             }
 
             if client_chain != reference_chain {
+                self.print_all_canonical_chains(until_block, "CHAIN MISMATCH");
                 return Err(format!(
                     "Chain mismatch: {} differs from {}",
                     client.client_id(),

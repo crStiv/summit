@@ -25,4 +25,6 @@ pub struct ApplicationConfig<C: EngineClient> {
     pub validator_minimum_stake: u64, // in gwei
 
     pub validator_withdrawal_period: u64,
+
+    pub validator_max_withdrawals_per_block: usize,
 }

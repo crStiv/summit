@@ -476,6 +476,46 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 
         result
     }
+
+    /// Get the next K pending withdrawals that are ready for processing at the given block height.
+    /// Only returns withdrawals where withdrawal_height <= block_height.
+    pub async fn get_next_ready_withdrawals(
+        &self,
+        block_height: u64,
+        k: usize,
+    ) -> Vec<PendingWithdrawal>
+    where
+        PendingWithdrawal: Clone,
+    {
+        let mut ready_withdrawals = Vec::new();
+        let head_value = self.get_withdrawal_head().await;
+        let tail_value = self.get_withdrawal_tail().await;
+
+        let mut current = head_value;
+        while current < tail_value && ready_withdrawals.len() < k {
+            let key = Self::make_queue_key(WITHDRAWAL_QUEUE_PREFIX, current);
+
+            if let Some(Value::PendingWithdrawal(withdrawal)) = self
+                .store
+                .get(&key)
+                .await
+                .expect("failed to get withdrawal")
+            {
+                // Only include withdrawals that are ready (withdrawal_height <= block_height)
+                if withdrawal.withdrawal_height <= block_height {
+                    ready_withdrawals.push(withdrawal.clone());
+                } else {
+                    // Since withdrawals are stored in FIFO order, if this one isn't ready,
+                    // none of the subsequent ones will be ready either
+                    break;
+                }
+            }
+
+            current += 1;
+        }
+
+        ready_withdrawals
+    }
 }
 
 #[derive(Clone)]
@@ -798,6 +838,78 @@ mod tests {
     }
 
     #[test]
+    fn test_get_next_ready_withdrawals() {
+        let cfg = commonware_runtime::deterministic::Config::default().with_seed(9);
+        let executor = Runner::from(cfg);
+        executor.start(|context| async move {
+            let mut db = create_test_db_with_context("test_ready_withdrawals", context).await;
+
+            // Add withdrawals with different withdrawal heights
+            let withdrawal1 = PendingWithdrawal {
+                inner: Withdrawal {
+                    index: 1,
+                    validator_index: 10,
+                    address: Address::from([1u8; 20]),
+                    amount: 16000000000,
+                },
+                withdrawal_height: 100, // Ready at height 100
+            };
+
+            let withdrawal2 = PendingWithdrawal {
+                inner: Withdrawal {
+                    index: 2,
+                    validator_index: 20,
+                    address: Address::from([2u8; 20]),
+                    amount: 24000000000,
+                },
+                withdrawal_height: 150, // Ready at height 150
+            };
+
+            let withdrawal3 = PendingWithdrawal {
+                inner: Withdrawal {
+                    index: 3,
+                    validator_index: 30,
+                    address: Address::from([3u8; 20]),
+                    amount: 32000000000,
+                },
+                withdrawal_height: 200, // Ready at height 200
+            };
+
+            db.push_withdrawal(withdrawal1.clone()).await;
+            db.push_withdrawal(withdrawal2.clone()).await;
+            db.push_withdrawal(withdrawal3.clone()).await;
+
+            // Test: At height 50, no withdrawals should be ready
+            let ready = db.get_next_ready_withdrawals(50, 10).await;
+            assert_eq!(ready.len(), 0);
+
+            // Test: At height 100, only withdrawal1 should be ready
+            let ready = db.get_next_ready_withdrawals(100, 10).await;
+            assert_eq!(ready.len(), 1);
+            assert_eq!(ready[0].inner.index, 1);
+
+            // Test: At height 150, withdrawal1 and withdrawal2 should be ready
+            let ready = db.get_next_ready_withdrawals(150, 10).await;
+            assert_eq!(ready.len(), 2);
+            assert_eq!(ready[0].inner.index, 1);
+            assert_eq!(ready[1].inner.index, 2);
+
+            // Test: At height 200, all withdrawals should be ready
+            let ready = db.get_next_ready_withdrawals(200, 10).await;
+            assert_eq!(ready.len(), 3);
+            assert_eq!(ready[0].inner.index, 1);
+            assert_eq!(ready[1].inner.index, 2);
+            assert_eq!(ready[2].inner.index, 3);
+
+            // Test: Limit k=2, should only return first 2
+            let ready = db.get_next_ready_withdrawals(200, 2).await;
+            assert_eq!(ready.len(), 2);
+            assert_eq!(ready[0].inner.index, 1);
+            assert_eq!(ready[1].inner.index, 2);
+        });
+    }
+
+    #[test]
     fn test_persistence_across_recreations() {
         use commonware_runtime::tokio;
         use std::{env, fs};
@@ -828,6 +940,9 @@ mod tests {
                     .await;
                 db.push_withdrawal(create_test_withdrawal_request(1, 8000000000))
                     .await;
+
+                // Commit all changes
+                db.store.commit().await.expect("failed to commit test data");
 
                 // Verify data is there
                 assert_eq!(db.get_latest_height().await, 42);

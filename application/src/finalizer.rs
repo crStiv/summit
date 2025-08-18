@@ -42,7 +42,8 @@ pub struct Finalizer<
 
     height_notify_mailbox: mpsc::Receiver<(u64, oneshot::Sender<()>)>,
 
-    //next_withdraw_request_mailbox: mpsc::Receiver<((), oneshot::Sender<()>)>,
+    pending_withdrawal_mailbox: mpsc::Receiver<(u64, oneshot::Sender<Vec<PendingWithdrawal>>)>,
+
     engine_client: C,
 
     registry: Registry,
@@ -62,6 +63,8 @@ pub struct Finalizer<
     validator_minimum_stake: u64, // in gwei
 
     validator_withdrawal_period: u64, // in blocks
+
+    validator_max_withdrawals_per_block: usize,
 }
 
 impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient>
@@ -78,10 +81,12 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         validator_onboarding_limit_per_block: usize,
         validator_minimum_stake: u64,
         validator_withdrawal_period: u64,
+        validator_max_withdrawals_per_block: usize,
     ) -> (
         Self,
         FinalizerMailbox,
         mpsc::Sender<(u64, oneshot::Sender<()>)>,
+        mpsc::Sender<(u64, oneshot::Sender<Vec<PendingWithdrawal>>)>,
     ) {
         let state_cfg = PersistentQueueConfig {
             log_journal_partition: format!("{db_prefix}-finalizer_state-log"),
@@ -107,6 +112,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         .expect("failed to initialize account metadata");
 
         let (tx_height_notify, height_notify_mailbox) = mpsc::channel(1000);
+        let (tx_pending_withdrawal, pending_withdrawal_mailbox) = mpsc::channel(1000);
 
         let (tx_finalizer, rx_finalizer_mailbox) = mpsc::channel(1); // todo(dalton) there should only ever be one message in this channel since we block but lets verify this
 
@@ -115,6 +121,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 context,
                 height_notifier: HeightNotifier::new(),
                 height_notify_mailbox,
+                pending_withdrawal_mailbox,
                 engine_client,
                 registry,
                 forkchoice,
@@ -125,9 +132,11 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 validator_onboarding_limit_per_block,
                 validator_minimum_stake,
                 validator_withdrawal_period,
+                validator_max_withdrawals_per_block,
             },
             FinalizerMailbox::new(tx_finalizer),
             tx_height_notify,
+            tx_pending_withdrawal,
         )
     }
 
@@ -147,6 +156,17 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                         }
 
                         self.height_notifier.register(height, sender);
+                    },
+
+                    mail = self.pending_withdrawal_mailbox.next() => {
+                        let (height, sender) = mail.expect("pending withdrawal mailbox dropped");
+
+                        // TODO(matthias): the height notify should take care of the synchronization, but verify this
+                        // Get ready withdrawals at the current height
+                        let ready_withdrawals = self.state
+                            .get_next_ready_withdrawals(height, self.validator_max_withdrawals_per_block)
+                            .await;
+                        let _ = sender.send(ready_withdrawals);
                     },
 
                     msg = self.rx_finalizer_mailbox.next() => {
