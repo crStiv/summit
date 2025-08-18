@@ -40,6 +40,8 @@ pub struct Finalizer<
 
     height_notify_mailbox: mpsc::Receiver<(u64, oneshot::Sender<()>)>,
 
+    //next_withdraw_request_mailbox: mpsc::Receiver<((), oneshot::Sender<()>)>,
+
     engine_client: C,
 
     registry: Registry,

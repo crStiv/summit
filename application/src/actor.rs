@@ -32,7 +32,7 @@ struct ChannelClosedFuture<'a, T> {
     sender: &'a mut oneshot::Sender<T>,
 }
 
-impl<T> futures::Future for ChannelClosedFuture<'_, T> {
+impl<T> Future for ChannelClosedFuture<'_, T> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
