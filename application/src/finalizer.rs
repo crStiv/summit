@@ -202,7 +202,12 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                                 self.state.push_deposit(deposit_request).await;
                                             }
                                             ExecutionRequest::Withdrawal(withdrawal_request) => {
-                                                self.state.push_withdrawal_request(withdrawal_request, new_height + self.validator_withdrawal_period).await;
+                                                // Only add the withdrawal request if the validator exists and has sufficient balance
+                                                if let Some(account) = self.state.get_account(&withdrawal_request.validator_pubkey).await {
+                                                    if account.amount >= withdrawal_request.amount {
+                                                        self.state.push_withdrawal_request(withdrawal_request, new_height + self.validator_withdrawal_period).await;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
