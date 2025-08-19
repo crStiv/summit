@@ -72,3 +72,11 @@ prom = ["prometheus", "reth-metrics", "metrics",
   #"jsonrpsee-server", "http", "eyre", "procfs", "tower"]
     "jsonrpsee-server", "http", "eyre", "procfs", "tokio", "tower"]
 jemalloc = ["dep:tikv-jemalloc-ctl"]
+
+[[bin]]
+name = "dkg_testnet"
+path = "src/bin/dkg_testnet.rs"
+
+[[bin]]
+name = "testnet"
+path = "src/bin/testnet.rs"
