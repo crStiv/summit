@@ -3,6 +3,14 @@ name = "summit"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "dkg_testnet"
+path = "src/bin/dkg_testnet.rs"
+
+[[bin]]
+name = "testnet"
+path = "src/bin/testnet.rs"
+
 [dependencies]
 summit-types.workspace = true
 summit-application.workspace = true
