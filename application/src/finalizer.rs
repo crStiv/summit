@@ -203,13 +203,21 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             ExecutionRequest::Deposit(deposit_request) => {
                                                 self.state.push_deposit(deposit_request).await;
                                             }
-                                            ExecutionRequest::Withdrawal(withdrawal_request) => {
+                                            ExecutionRequest::Withdrawal(mut withdrawal_request) => {
                                                 // Only add the withdrawal request if the validator exists and has sufficient balance
                                                 if let Some(mut account) = self.state.get_account(&withdrawal_request.validator_pubkey).await {
                                                     // The balance minus any pending withdrawals have to be larger than the amount of the withdrawal request
                                                     if account.balance - account.pending_withdrawal_amount >= withdrawal_request.amount {
                                                         // The source address must match the validators withdrawal address
                                                         if withdrawal_request.source_address == account.withdrawal_credentials {
+                                                            // If after this withdrawal the validator balance would be less than the
+                                                            // minimum stake, then the full validator balance is withdrawn.
+                                                            if account.balance - account.pending_withdrawal_amount - withdrawal_request.amount < self.validator_minimum_stake {
+                                                                // Check the remaining balance and set the withdrawal amount accordingly
+                                                                let remaining_balance = account.balance - account.pending_withdrawal_amount;
+                                                                withdrawal_request.amount = remaining_balance;
+                                                                // TODO(matthias): set the validator status to pending exit
+                                                            }
                                                             account.pending_withdrawal_amount += withdrawal_request.amount;
                                                             self.state.set_account(&withdrawal_request.validator_pubkey, account).await;
                                                             self.state.push_withdrawal_request(withdrawal_request.clone(), new_height + self.validator_withdrawal_period).await;
