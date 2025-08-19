@@ -205,9 +205,15 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             }
                                             ExecutionRequest::Withdrawal(withdrawal_request) => {
                                                 // Only add the withdrawal request if the validator exists and has sufficient balance
-                                                if let Some(account) = self.state.get_account(&withdrawal_request.validator_pubkey).await {
-                                                    if account.balance >= withdrawal_request.amount {
-                                                        self.state.push_withdrawal_request(withdrawal_request, new_height + self.validator_withdrawal_period).await;
+                                                if let Some(mut account) = self.state.get_account(&withdrawal_request.validator_pubkey).await {
+                                                    // The balance minus any pending withdrawals have to be larger than the amount of the withdrawal request
+                                                    if account.balance - account.pending_withdrawal_amount >= withdrawal_request.amount {
+                                                        // The source address must match the validators withdrawal address
+                                                        if withdrawal_request.source_address == account.withdrawal_credentials {
+                                                            account.pending_withdrawal_amount += withdrawal_request.amount;
+                                                            self.state.set_account(&withdrawal_request.validator_pubkey, account).await;
+                                                            self.state.push_withdrawal_request(withdrawal_request.clone(), new_height + self.validator_withdrawal_period).await;
+                                                        }
                                                     }
                                                 }
                                             }
@@ -275,7 +281,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                 }
                             }
 
-                            // Remove pending withdrawals are included in the committed block
+                            // Remove pending withdrawals that are included in the committed block
                             for withdrawal in block.payload.payload_inner.withdrawals {
                                 let pending_withdrawal = self.state.pop_withdrawal().await;
                                 // TODO(matthias): these checks should never fail. we have to make sure that these withdrawals are
@@ -287,7 +293,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                     if account.balance >= withdrawal.amount {
                                         // This check should never fail, because we checked the balance when
                                         // adding the pending withdrawal to the queue
-                                        account.balance -= withdrawal.amount;
+                                        account.balance = account.balance.saturating_sub(withdrawal.amount);
                                         account.pending_withdrawal_amount = account.pending_withdrawal_amount.saturating_sub(withdrawal.amount);
                                         self.state.set_account(&pending_withdrawal.bls_pubkey, account).await;
                                     }
