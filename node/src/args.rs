@@ -1,7 +1,7 @@
 use crate::{
     config::{
         BACKFILLER_CHANNEL, BROADCASTER_CHANNEL, EngineConfig, MESSAGE_BACKLOG, PENDING_CHANNEL,
-        RECOVERED_CHANNEL, RESOLVER_CHANNEL,
+        RECOVERED_CHANNEL, RESOLVER_CHANNEL, expect_keys,
     },
     engine::Engine,
     keys::KeySubCmd,
@@ -111,6 +111,7 @@ impl Command {
     }
 
     pub fn run_node(&self, flags: &Flags) {
+        let (signer, share) = expect_keys(&flags.key_path, &flags.share_path);
         let genesis =
             Genesis::load_from_file(&flags.genesis_path).expect("Can not find genesis file");
 
@@ -130,8 +131,8 @@ impl Command {
         let engine_client = RethEngineClient::new(engine_url.clone(), &engine_jwt);
         let config = EngineConfig::get_engine_config(
             engine_client,
-            flags.key_path.clone(),
-            flags.share_path.clone(),
+            signer,
+            share,
             peers.clone(),
             flags.db_prefix.clone(),
             &genesis,
@@ -253,6 +254,7 @@ pub fn run_node_with_runtime(
     context: commonware_runtime::tokio::Context,
     flags: Flags,
 ) -> Handle<()> {
+    let (signer, share) = expect_keys(&flags.key_path, &flags.share_path);
     let genesis = Genesis::load_from_file(&flags.genesis_path).expect("Can not find genesis file");
 
     let mut committee: Vec<(PublicKey, SocketAddr)> = genesis
@@ -270,8 +272,8 @@ pub fn run_node_with_runtime(
     let engine_client = RethEngineClient::new(engine_url.clone(), &engine_jwt);
     let config = EngineConfig::get_engine_config(
         engine_client,
-        flags.key_path.clone(),
-        flags.share_path.clone(),
+        signer,
+        share,
         peers.clone(),
         flags.db_prefix.clone(),
         &genesis,

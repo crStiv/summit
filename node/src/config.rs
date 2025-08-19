@@ -60,22 +60,13 @@ pub struct EngineConfig<C: EngineClient> {
 impl<C: EngineClient> EngineConfig<C> {
     pub fn get_engine_config(
         engine_client: C,
-        key_path: String,
-        poly_share_path: String,
+        signer: PrivateKey,
+        share: Share,
         participants: Vec<PublicKey>,
         db_prefix: String,
         genesis: &Genesis,
     ) -> Result<Self> {
-        // todo(dalton): clean this mess up
-        let share_path =
-            get_expanded_path(&poly_share_path).context("failed to expand share path")?;
-        let share_hex = std::fs::read_to_string(share_path).context("failed to load share hex")?;
-
-        let share = from_hex_formatted(&share_hex).expect("invalid format for polynomial share");
-        let share = group::Share::decode(share.as_ref()).expect("Could not parse share");
-
-        // read private key from file
-        let signer = read_ed_key_from_path(&key_path).context("failed to load signer key")?;
+        // TODO(dalton): should we validate polynomial construction after we wait to load genesis?
         let polynomial = from_hex_formatted(&genesis.identity).expect("Could not parse polynomial");
         let threshold = quorum(participants.len() as u32);
         let polynomial =
@@ -107,5 +98,65 @@ impl<C: EngineClient> EngineConfig<C> {
             polynomial,
             share,
         })
+    }
+}
+
+pub(crate) fn load_signer(key_path: &str) -> anyhow::Result<PrivateKey> {
+    read_ed_key_from_path(&key_path).context("failed to load signer key")
+}
+
+pub(crate) fn load_share(poly_share_path: &str) -> anyhow::Result<Share> {
+    let share_path = get_expanded_path(poly_share_path).context("failed to expand share path")?;
+    let share_hex = std::fs::read_to_string(share_path).context("failed to load share hex")?;
+
+    let share_vec = from_hex_formatted(&share_hex).expect("invalid format for polynomial share");
+    let share = group::Share::decode(share_vec.as_ref()).expect("Could not parse share");
+    Ok(share)
+}
+
+pub(crate) fn expect_keys(key_path: &str, poly_share_path: &str) -> (PrivateKey, Share) {
+    let signer_res = load_signer(key_path);
+    let share_res = load_share(poly_share_path);
+    let (signer, share) = match (signer_res, share_res) {
+        (Ok(signer), Ok(share)) => (signer, share),
+        (Err(signer_err), Ok(_)) => {
+            panic!("\nSigner error @ path {}: {}\n", key_path, signer_err);
+        }
+        (Ok(_), Err(share_err)) => {
+            panic!("\nShare error @ path {}: {}\n", poly_share_path, share_err);
+        }
+        (Err(signer_err), Err(share_err)) => {
+            panic!(
+                "\nFailed to load signer and share keys\nSigner error @ path {}: {}\nShare  error @ path {}: {}\n",
+                key_path, signer_err, poly_share_path, share_err
+            );
+        }
+    };
+    (signer, share)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::config::expect_keys;
+
+    #[test]
+    fn test_expect_keys_node0() {
+        let keys_dir = {
+            let node_crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let repo_root = node_crate_dir.parent().unwrap();
+            repo_root.join("testnet/node0")
+        };
+        expect_keys(
+            &keys_dir.join("key.pem").to_string_lossy(),
+            &keys_dir.join("share.pem").to_string_lossy(),
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_expect_keys_error_msg() {
+        expect_keys("missing-signer.pem", "missing-share.pem");
     }
 }
