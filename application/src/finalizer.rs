@@ -203,23 +203,32 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             ExecutionRequest::Withdrawal(mut withdrawal_request) => {
                                                 // Only add the withdrawal request if the validator exists and has sufficient balance
                                                 if let Some(mut account) = self.state.get_account(&withdrawal_request.validator_pubkey).await {
-                                                    // The balance minus any pending withdrawals have to be larger than the amount of the withdrawal request
-                                                    if account.balance - account.pending_withdrawal_amount >= withdrawal_request.amount {
-                                                        // The source address must match the validators withdrawal address
-                                                        if withdrawal_request.source_address == account.withdrawal_credentials {
-                                                            // If after this withdrawal the validator balance would be less than the
-                                                            // minimum stake, then the full validator balance is withdrawn.
-                                                            if account.balance - account.pending_withdrawal_amount - withdrawal_request.amount < self.validator_minimum_stake {
-                                                                // Check the remaining balance and set the withdrawal amount accordingly
-                                                                let remaining_balance = account.balance - account.pending_withdrawal_amount;
-                                                                withdrawal_request.amount = remaining_balance;
-                                                                // TODO(matthias): set the validator status to pending exit
-                                                            }
-                                                            account.pending_withdrawal_amount += withdrawal_request.amount;
-                                                            self.state.set_account(&withdrawal_request.validator_pubkey, account).await;
-                                                            self.state.push_withdrawal_request(withdrawal_request.clone(), new_height + self.validator_withdrawal_period).await;
-                                                        }
+                                                    // Check that the validator is active and hasn't submitted an exit request
+                                                    if matches!(account.status, ValidatorStatus::Inactive | ValidatorStatus::SubmittedExitRequest) {
+                                                        continue; // Skip this withdrawal request
                                                     }
+
+                                                    // The balance minus any pending withdrawals have to be larger than the amount of the withdrawal request
+                                                    if account.balance - account.pending_withdrawal_amount < withdrawal_request.amount {
+                                                        continue; // Skip this withdrawal request
+                                                    }
+
+                                                    // The source address must match the validators withdrawal address
+                                                    if withdrawal_request.source_address != account.withdrawal_credentials {
+                                                        continue; // Skip this withdrawal request
+                                                    }
+
+                                                    // If after this withdrawal the validator balance would be less than the
+                                                    // minimum stake, then the full validator balance is withdrawn.
+                                                    if account.balance - account.pending_withdrawal_amount - withdrawal_request.amount < self.validator_minimum_stake {
+                                                        // Check the remaining balance and set the withdrawal amount accordingly
+                                                        let remaining_balance = account.balance - account.pending_withdrawal_amount;
+                                                        withdrawal_request.amount = remaining_balance;
+                                                        account.status = ValidatorStatus::SubmittedExitRequest;
+                                                    }
+                                                    account.pending_withdrawal_amount += withdrawal_request.amount;
+                                                    self.state.set_account(&withdrawal_request.validator_pubkey, account).await;
+                                                    self.state.push_withdrawal_request(withdrawal_request.clone(), new_height + self.validator_withdrawal_period).await;
                                                 }
                                             }
                                         }
@@ -300,6 +309,13 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                         // adding the pending withdrawal to the queue
                                         account.balance = account.balance.saturating_sub(withdrawal.amount);
                                         account.pending_withdrawal_amount = account.pending_withdrawal_amount.saturating_sub(withdrawal.amount);
+
+                                        // If the remaining balance is 0, mark the validator as inactive.
+                                        // An argument can be made from removing the validator account from the DB here.
+                                        if account.balance == 0 {
+                                            account.status = ValidatorStatus::Inactive;
+                                        }
+
                                         self.state.set_account(&pending_withdrawal.bls_pubkey, account).await;
                                     }
                                 }
