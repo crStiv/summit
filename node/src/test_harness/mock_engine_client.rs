@@ -1,4 +1,5 @@
 use alloy_eips::eip7685::Requests;
+use alloy_primitives::hex;
 use alloy_primitives::{Address, B256, Bloom, Bytes, FixedBytes, U256};
 use alloy_rpc_types_engine::{
     BlobsBundleV1, ExecutionPayloadEnvelopeV3, ExecutionPayloadEnvelopeV4, ExecutionPayloadV1,
