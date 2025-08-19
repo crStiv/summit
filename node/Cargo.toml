@@ -73,7 +73,7 @@ commonware-macros.workspace = true
 tracing-subscriber = "0.3.19"
 # test harness (move to dev-deps later)
 alloy-rpc-types-engine.workspace = true
-alloy-consensus = "1.0.12"
+alloy-consensus.workspace = true
 dashmap = "6.1.0"
 sha3 = "0.10.8"
 alloy-eips = "1.0.23"

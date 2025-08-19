@@ -25,6 +25,7 @@ commonware-macros = "0.0.58"
 
 alloy-consensus = "1.0.12"
 alloy-eips = { version = "1.0.19", features = ["ssz"] }
+alloy-network = "1.0.9"
 alloy-node-bindings = "1.0.9"
 alloy-rpc-client = { version = "1.0.9", features = [
     "hyper",
