@@ -54,8 +54,6 @@ pub struct Finalizer<
 
     state: FinalizerState<R>,
 
-    accounts: Metadata<R, FixedBytes<48>, DepositRequest>,
-
     validator_onboarding_interval: u64,
 
     validator_onboarding_limit_per_block: usize,
@@ -101,16 +99,6 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         };
         let state = FinalizerState::new(context.with_label("finalizer_state"), state_cfg).await;
 
-        let accounts: Metadata<R, FixedBytes<48>, DepositRequest> = Metadata::init(
-            context.with_label("finalizer_accounts"),
-            Config {
-                partition: format!("{db_prefix}-finalizer_accounts"),
-                codec_config: (),
-            },
-        )
-        .await
-        .expect("failed to initialize account metadata");
-
         let (tx_height_notify, height_notify_mailbox) = mpsc::channel(1000);
         let (tx_pending_withdrawal, pending_withdrawal_mailbox) = mpsc::channel(1000);
 
@@ -127,7 +115,6 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 forkchoice,
                 rx_finalizer_mailbox,
                 state,
-                accounts,
                 validator_onboarding_interval,
                 validator_onboarding_limit_per_block,
                 validator_minimum_stake,
@@ -229,31 +216,26 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                             let last_indexed = self.state.get_latest_height().await;
                             if last_indexed % self.validator_onboarding_interval == 0 {
                                 for _ in 0..self.validator_onboarding_limit_per_block {
-                                    if let Some(request) = self.state.peek_deposit().await {
+                                    if let Some(request) = self.state.pop_deposit().await {
                                         let mut validator_balance = 0;
-                                        if let Some(account) = self.accounts.get_mut(&FixedBytes::new(request.bls_pubkey)) {
-                                            // Since we only remove the request from the queue after processing it,
-                                            // it can happen that the binary crashes, and then we will process the same request twice.
-                                            // If the index matches, we are processing the same request that we already processed. In that
-                                            // case we won't increment the balance.
+                                        if let Some(mut account) = self.state.get_account(&request.bls_pubkey).await {
                                             if request.index > account.index {
                                                 account.amount += request.amount;
                                                 validator_balance += account.amount;
-
+                                                self.state.set_account(&request.bls_pubkey, account).await;
                                             }
                                         } else {
-                                            self.accounts.put(FixedBytes::new(request.bls_pubkey), request.clone());
+                                            self.state.set_account(&request.bls_pubkey, request.clone()).await;
                                             validator_balance += request.amount;
                                         }
                                         if validator_balance > self.validator_minimum_stake {
+                                            // If the node shuts down, before the account changes are committed,
+                                            // then everything should work normally, because the registry is not persisted to disk
                                             if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone(), last_indexed) {
                                                 // This only happens if the key already exists
                                                 warn!("Failed to add validator: {}", e);
                                             }
                                         }
-
-                                        // Only remove the request from the queue after we processed and stored it
-                                        let _ = self.state.pop_deposit().await;
                                     }
                                 }
                             }
