@@ -6,6 +6,7 @@ use commonware_storage::store::{self, Store};
 use commonware_storage::translator::TwoCap;
 use commonware_utils::sequence::FixedBytes;
 pub use store::Config;
+use summit_types::account::ValidatorAccount;
 use summit_types::execution_request::{DepositRequest, WithdrawalRequest};
 use summit_types::withdrawal::PendingWithdrawal;
 
@@ -193,10 +194,10 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
     }
 
     // Account operations
-    pub async fn get_account(&self, pubkey: &[u8; 48]) -> Option<DepositRequest> {
+    pub async fn get_account(&self, pubkey: &[u8; 48]) -> Option<ValidatorAccount> {
         let key = Self::make_account_key(pubkey);
 
-        if let Some(Value::DepositRequest(account)) =
+        if let Some(Value::ValidatorAccount(account)) =
             self.store.get(&key).await.expect("failed to get account")
         {
             Some(account)
@@ -205,11 +206,11 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
         }
     }
 
-    pub async fn set_account(&mut self, pubkey: &[u8; 48], account: DepositRequest) {
+    pub async fn set_account(&mut self, pubkey: &[u8; 48], account: ValidatorAccount) {
         let key = Self::make_account_key(pubkey);
 
         self.store
-            .update(key, Value::DepositRequest(account))
+            .update(key, Value::ValidatorAccount(account))
             .await
             .expect("failed to set account");
     }
@@ -524,6 +525,7 @@ enum Value {
     U64(u64),
     DepositRequest(DepositRequest),
     PendingWithdrawal(PendingWithdrawal),
+    ValidatorAccount(ValidatorAccount),
 }
 
 impl EncodeSize for Value {
@@ -532,6 +534,7 @@ impl EncodeSize for Value {
             Self::U64(_) => 8,
             Self::DepositRequest(req) => req.encode_size(),
             Self::PendingWithdrawal(req) => req.encode_size(),
+            Self::ValidatorAccount(acc) => acc.encode_size(),
         }
     }
 }
@@ -545,6 +548,10 @@ impl Read for Value {
             0x01 => Ok(Self::U64(buf.get_u64())),
             0x02 => Ok(Self::DepositRequest(DepositRequest::read_cfg(buf, &())?)),
             0x03 => Ok(Self::PendingWithdrawal(PendingWithdrawal::read_cfg(
+                buf,
+                &(),
+            )?)),
+            0x04 => Ok(Self::ValidatorAccount(ValidatorAccount::read_cfg(
                 buf,
                 &(),
             )?)),
@@ -568,6 +575,10 @@ impl Write for Value {
                 buf.put_u8(0x03);
                 req.write(buf);
             }
+            Self::ValidatorAccount(acc) => {
+                buf.put_u8(0x04);
+                acc.write(buf);
+            }
         }
     }
 }
@@ -582,6 +593,7 @@ mod tests {
     use commonware_runtime::{Runner as _, deterministic::Runner};
     use commonware_utils::{NZU64, NZUsize};
     use summit_types::PublicKey;
+    use summit_types::account::{ValidatorAccount, ValidatorStatus};
     use summit_types::execution_request::{DepositRequest, WithdrawalRequest};
     use summit_types::withdrawal::PendingWithdrawal;
 
@@ -606,10 +618,20 @@ mod tests {
     fn create_test_deposit_request(index: u64, amount: u64) -> DepositRequest {
         // Use the exact same pattern as the working tests - just [1u8; 32] for all keys
         // since this is test data and we only need it to be valid, not unique
+
+        // Create valid Eth1 withdrawal credentials: 0x01 + 11 zero bytes + 20-byte address
+        let mut withdrawal_credentials = [0u8; 32];
+        withdrawal_credentials[0] = 0x01; // Eth1 withdrawal prefix
+        // bytes 1..12 are already zero
+        // Use index as the address pattern for the last 20 bytes
+        for i in 0..20 {
+            withdrawal_credentials[12 + i] = index as u8;
+        }
+
         DepositRequest {
             bls_pubkey: [index as u8; 48],
             ed25519_pubkey: PublicKey::decode(&[1u8; 32][..]).unwrap(),
-            withdrawal_credentials: [index as u8; 32],
+            withdrawal_credentials,
             amount,
             signature: [index as u8; 96],
             index,
@@ -625,7 +647,18 @@ mod tests {
                 amount,
             },
             withdrawal_height: index * 100, // Some height value
-            bls_pubkey: [index as u8; 48], // Use index as bls_pubkey pattern
+            bls_pubkey: [index as u8; 48],  // Use index as bls_pubkey pattern
+        }
+    }
+
+    fn create_test_validator_account(index: u64, balance: u64) -> ValidatorAccount {
+        ValidatorAccount {
+            ed25519_pubkey: PublicKey::decode(&[1u8; 32][..]).unwrap(),
+            withdrawal_credentials: Address::from([index as u8; 20]),
+            balance,
+            pending_withdrawal_amount: 0,
+            status: ValidatorStatus::Active,
+            last_deposit_index: index,
         }
     }
 
@@ -657,27 +690,30 @@ mod tests {
             let mut db = create_test_db_with_context("test_accounts", context).await;
 
             let pubkey = [1u8; 48];
-            let deposit_req = create_test_deposit_request(1, 32000000000); // 32 ETH in gwei
+            let validator_account = create_test_validator_account(1, 32000000000); // 32 ETH in gwei
 
             // Test account doesn't exist initially
             assert!(db.get_account(&pubkey).await.is_none());
 
             // Test setting account
-            db.set_account(&pubkey, deposit_req.clone()).await;
+            db.set_account(&pubkey, validator_account.clone()).await;
 
             // Test getting account
             let retrieved = db.get_account(&pubkey).await;
             assert!(retrieved.is_some());
             let retrieved = retrieved.unwrap();
-            assert_eq!(retrieved.bls_pubkey, pubkey);
-            assert_eq!(retrieved.amount, 32000000000);
-            assert_eq!(retrieved.index, 1);
+            assert_eq!(retrieved.withdrawal_credentials, Address::from([1u8; 20]));
+            assert_eq!(retrieved.balance, 32000000000);
+            assert_eq!(retrieved.last_deposit_index, 1);
+            assert_eq!(retrieved.status, ValidatorStatus::Active);
 
             // Test updating account
-            let updated_req = create_test_deposit_request(1, 64000000000); // 64 ETH
-            db.set_account(&pubkey, updated_req).await;
+            let mut updated_account = create_test_validator_account(1, 64000000000); // 64 ETH
+            updated_account.last_deposit_index = 2;
+            db.set_account(&pubkey, updated_account).await;
             let retrieved = db.get_account(&pubkey).await.unwrap();
-            assert_eq!(retrieved.amount, 64000000000);
+            assert_eq!(retrieved.balance, 64000000000);
+            assert_eq!(retrieved.last_deposit_index, 2);
         });
     }
 
@@ -809,6 +845,7 @@ mod tests {
 
             // Test that different data types don't interfere
             let pubkey = [42u8; 48];
+            let validator_account = create_test_validator_account(1, 32000000000);
             let deposit_req = create_test_deposit_request(1, 32000000000);
             let withdrawal_req = create_test_withdrawal_request(1, 16000000000);
 
@@ -816,7 +853,7 @@ mod tests {
             db.set_latest_height(100).await;
 
             // Set account
-            db.set_account(&pubkey, deposit_req.clone()).await;
+            db.set_account(&pubkey, validator_account.clone()).await;
 
             // Push to both queues
             db.push_deposit(deposit_req.clone()).await;
@@ -827,7 +864,7 @@ mod tests {
 
             let account = db.get_account(&pubkey).await;
             assert!(account.is_some());
-            assert_eq!(account.unwrap().amount, 32000000000);
+            assert_eq!(account.unwrap().balance, 32000000000);
 
             let deposit_peeked = db.peek_deposit().await;
             assert!(deposit_peeked.is_some());
@@ -938,8 +975,8 @@ mod tests {
                 db.set_latest_height(42).await;
 
                 let pubkey = [1u8; 48];
-                let deposit_req = create_test_deposit_request(1, 32000000000);
-                db.set_account(&pubkey, deposit_req.clone()).await;
+                let validator_account = create_test_validator_account(1, 32000000000);
+                db.set_account(&pubkey, validator_account.clone()).await;
 
                 db.push_deposit(create_test_deposit_request(2, 16000000000))
                     .await;
@@ -971,7 +1008,7 @@ mod tests {
                 let pubkey = [1u8; 48];
                 let account = db.get_account(&pubkey).await;
                 assert!(account.is_some());
-                assert_eq!(account.unwrap().amount, 32000000000);
+                assert_eq!(account.unwrap().balance, 32000000000);
 
                 let deposit = db.peek_deposit().await;
                 assert!(deposit.is_some());
@@ -993,6 +1030,45 @@ mod tests {
         // Clean up test data
         if db_path.exists() {
             fs::remove_dir_all(&db_path).ok();
+        }
+    }
+
+    fn create_invalid_withdrawal_credentials_deposit(
+        index: u64,
+        amount: u64,
+        invalid_type: &str,
+    ) -> DepositRequest {
+        let mut withdrawal_credentials = [0u8; 32];
+
+        match invalid_type {
+            "wrong_prefix" => {
+                withdrawal_credentials[0] = 0x00; // Wrong prefix, should be 0x01
+                for i in 0..20 {
+                    withdrawal_credentials[12 + i] = index as u8;
+                }
+            }
+            "non_zero_middle" => {
+                withdrawal_credentials[0] = 0x01; // Correct prefix
+                withdrawal_credentials[5] = 0xFF; // Invalid: non-zero in middle bytes
+                for i in 0..20 {
+                    withdrawal_credentials[12 + i] = index as u8;
+                }
+            }
+            _ => {
+                withdrawal_credentials[0] = 0x01;
+                for i in 0..20 {
+                    withdrawal_credentials[12 + i] = index as u8;
+                }
+            }
+        }
+
+        DepositRequest {
+            bls_pubkey: [index as u8; 48],
+            ed25519_pubkey: PublicKey::decode(&[1u8; 32][..]).unwrap(),
+            withdrawal_credentials,
+            amount,
+            signature: [index as u8; 96],
+            index,
         }
     }
 }

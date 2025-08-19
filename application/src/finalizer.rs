@@ -6,6 +6,7 @@ use std::{
 use crate::Registry;
 use crate::db::FinalizerState;
 use crate::engine_client::EngineClient;
+use alloy_primitives::Address;
 use alloy_rpc_types_engine::ForkchoiceState;
 use commonware_consensus::Reporter;
 use commonware_macros::select;
@@ -23,6 +24,7 @@ use futures::{
 use metrics::{counter, histogram};
 use rand::Rng;
 use summit_types::Block;
+use summit_types::account::{ValidatorAccount, ValidatorStatus};
 use summit_types::execution_request::{DepositRequest, ExecutionRequest, WithdrawalRequest};
 use summit_types::withdrawal::PendingWithdrawal;
 use summit_utils::persistent_queue::{Config as PersistentQueueConfig, PersistentQueue};
@@ -204,7 +206,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             ExecutionRequest::Withdrawal(withdrawal_request) => {
                                                 // Only add the withdrawal request if the validator exists and has sufficient balance
                                                 if let Some(account) = self.state.get_account(&withdrawal_request.validator_pubkey).await {
-                                                    if account.amount >= withdrawal_request.amount {
+                                                    if account.balance >= withdrawal_request.amount {
                                                         self.state.push_withdrawal_request(withdrawal_request, new_height + self.validator_withdrawal_period).await;
                                                     }
                                                 }
@@ -224,14 +226,42 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                     if let Some(request) = self.state.pop_deposit().await {
                                         let mut validator_balance = 0;
                                         if let Some(mut account) = self.state.get_account(&request.bls_pubkey).await {
-                                            if request.index > account.index {
-                                                account.amount += request.amount;
-                                                validator_balance += account.amount;
+                                            if request.index > account.last_deposit_index {
+                                                account.balance += request.amount;
+                                                account.last_deposit_index = request.index;
+                                                validator_balance = account.balance;
+                                                account.last_deposit_index = request.index;
                                                 self.state.set_account(&request.bls_pubkey, account).await;
                                             }
                                         } else {
-                                            self.state.set_account(&request.bls_pubkey, request.clone()).await;
-                                            validator_balance += request.amount;
+                                            // Validate the withdrawal credentials format
+                                            // Eth1 withdrawal credentials: 0x01 + 11 zero bytes + 20 bytes Ethereum address
+                                            if request.withdrawal_credentials.len() != 32 {
+                                                warn!("Invalid withdrawal credentials length: {} bytes, expected 32", request.withdrawal_credentials.len());
+                                                continue; // Skip this deposit
+                                            }
+                                            // Check prefix is 0x01 (Eth1 withdrawal)
+                                            if request.withdrawal_credentials[0] != 0x01 {
+                                                warn!("Invalid withdrawal credentials prefix: 0x{:02x}, expected 0x01", request.withdrawal_credentials[0]);
+                                                continue; // Skip this deposit
+                                            }
+                                            // Check 11 zero bytes after the prefix
+                                            if !request.withdrawal_credentials[1..12].iter().all(|&b| b == 0) {
+                                                warn!("Invalid withdrawal credentials format: non-zero bytes in positions 1-11");
+                                                continue; // Skip this deposit
+                                            }
+
+                                            // Create new ValidatorAccount from DepositRequest
+                                            let new_account = ValidatorAccount {
+                                                ed25519_pubkey: request.ed25519_pubkey.clone(),
+                                                withdrawal_credentials: Address::from_slice(&request.withdrawal_credentials[12..32]), // Take last 20 bytes
+                                                balance: request.amount,
+                                                pending_withdrawal_amount: 0,
+                                                status: ValidatorStatus::Active,
+                                                last_deposit_index: request.index,
+                                            };
+                                            self.state.set_account(&request.bls_pubkey, new_account).await;
+                                            validator_balance = request.amount;
                                         }
                                         if validator_balance > self.validator_minimum_stake {
                                             // If the node shuts down, before the account changes are committed,
@@ -254,10 +284,11 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                 assert_eq!(pending_withdrawal.inner, withdrawal);
 
                                 if let Some(mut account) = self.state.get_account(&pending_withdrawal.bls_pubkey).await {
-                                    if account.amount >= withdrawal.amount {
+                                    if account.balance >= withdrawal.amount {
                                         // This check should never fail, because we checked the balance when
                                         // adding the pending withdrawal to the queue
-                                        account.amount -= withdrawal.amount;
+                                        account.balance -= withdrawal.amount;
+                                        account.pending_withdrawal_amount = account.pending_withdrawal_amount.saturating_sub(withdrawal.amount);
                                         self.state.set_account(&pending_withdrawal.bls_pubkey, account).await;
                                     }
                                 }

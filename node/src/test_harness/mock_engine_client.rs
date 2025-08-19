@@ -434,12 +434,20 @@ impl MockEngineNetwork {
             return Ok(());
         }
 
-        let reference_chain = clients[0].get_canonical_chain();
         let reference_height = until_block.unwrap_or(clients[0].get_chain_height());
+        let reference_chain: Vec<(u64, _)> = clients[0]
+            .get_canonical_chain()
+            .into_iter()
+            .filter(|(height, _)| *height <= reference_height)
+            .collect();
 
         for client in clients.iter().skip(1) {
-            let client_chain = client.get_canonical_chain();
             let client_height = until_block.unwrap_or(client.get_chain_height());
+            let client_chain: Vec<(u64, _)> = client
+                .get_canonical_chain()
+                .into_iter()
+                .filter(|(height, _)| *height <= client_height)
+                .collect();
 
             if client_height != reference_height {
                 self.print_all_canonical_chains(until_block, "HEIGHT MISMATCH");

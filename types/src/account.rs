@@ -1,7 +1,7 @@
+use crate::PublicKey;
 use alloy_primitives::Address;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error, FixedSize, Read, Write, DecodeExt, Encode};
-use crate::PublicKey;
+use commonware_codec::{DecodeExt, Encode, Error, FixedSize, Read, Write};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidatorStatus {
@@ -31,13 +31,13 @@ impl ValidatorStatus {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatorAccount {
-    pub ed25519_pubkey: PublicKey,        // Validator ED25519 public key
+    pub ed25519_pubkey: PublicKey, // Validator ED25519 public key
     //pub bls_pubkey: [u8; 48],           // Validator BLS public key
-    pub withdrawal_credentials: Address,  // Ethereum address
-    pub balance: u64,                     // Balance in gwei
-    pub pending_withdrawal_amount: u64,   // Sum of pending withdrawals in gwei
+    pub withdrawal_credentials: Address, // Ethereum address
+    pub balance: u64,                    // Balance in gwei
+    pub pending_withdrawal_amount: u64,  // Sum of pending withdrawals in gwei
     pub status: ValidatorStatus,
-    pub last_deposit_index: u64,          // Last deposit request index
+    pub last_deposit_index: u64, // Last deposit request index
 }
 
 impl TryFrom<&[u8]> for ValidatorAccount {
@@ -166,7 +166,7 @@ mod tests {
         let account = ValidatorAccount {
             ed25519_pubkey: PublicKey::decode(&[1u8; 32][..]).unwrap(),
             withdrawal_credentials: Address::from([2u8; 20]),
-            balance: 32000000000u64, // 32 ETH in gwei
+            balance: 32000000000u64,                  // 32 ETH in gwei
             pending_withdrawal_amount: 1000000000u64, // 1 ETH in gwei
             status: ValidatorStatus::Active,
             last_deposit_index: 42u64,
@@ -187,7 +187,7 @@ mod tests {
         let account = ValidatorAccount {
             ed25519_pubkey: PublicKey::decode(&[3u8; 32][..]).unwrap(),
             withdrawal_credentials: Address::from([4u8; 20]),
-            balance: 64000000000u64, // 64 ETH in gwei
+            balance: 64000000000u64,                  // 64 ETH in gwei
             pending_withdrawal_amount: 2000000000u64, // 2 ETH in gwei
             status: ValidatorStatus::Inactive,
             last_deposit_index: 100u64,
@@ -245,7 +245,7 @@ mod tests {
         let account = ValidatorAccount {
             ed25519_pubkey: PublicKey::decode(&[1u8; 32][..]).unwrap(),
             withdrawal_credentials: Address::from([6u8; 20]),
-            balance: 128000000000u64, // 128 ETH in gwei
+            balance: 128000000000u64,                 // 128 ETH in gwei
             pending_withdrawal_amount: 4000000000u64, // 4 ETH in gwei
             status: ValidatorStatus::SubmittedExitRequest,
             last_deposit_index: 500u64,
@@ -289,9 +289,8 @@ mod tests {
         let account = ValidatorAccount {
             ed25519_pubkey: PublicKey::decode(&[0xAAu8; 32][..]).unwrap(),
             withdrawal_credentials: Address::from([
-                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-                0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
-                0x01, 0x02, 0x03, 0x04
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+                0xff, 0x00, 0x01, 0x02, 0x03, 0x04,
             ]),
             balance: 0x0123456789abcdefu64,
             pending_withdrawal_amount: 0xfedcba9876543210u64,
@@ -311,9 +310,8 @@ mod tests {
         assert_eq!(
             &bytes[32..52],
             &[
-                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-                0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
-                0x01, 0x02, 0x03, 0x04
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+                0xff, 0x00, 0x01, 0x02, 0x03, 0x04
             ]
         );
 
@@ -341,9 +339,18 @@ mod tests {
         assert_eq!(ValidatorStatus::Inactive.to_u8(), 1);
         assert_eq!(ValidatorStatus::SubmittedExitRequest.to_u8(), 2);
 
-        assert_eq!(ValidatorStatus::from_u8(0).unwrap(), ValidatorStatus::Active);
-        assert_eq!(ValidatorStatus::from_u8(1).unwrap(), ValidatorStatus::Inactive);
-        assert_eq!(ValidatorStatus::from_u8(2).unwrap(), ValidatorStatus::SubmittedExitRequest);
+        assert_eq!(
+            ValidatorStatus::from_u8(0).unwrap(),
+            ValidatorStatus::Active
+        );
+        assert_eq!(
+            ValidatorStatus::from_u8(1).unwrap(),
+            ValidatorStatus::Inactive
+        );
+        assert_eq!(
+            ValidatorStatus::from_u8(2).unwrap(),
+            ValidatorStatus::SubmittedExitRequest
+        );
 
         // Test invalid status
         assert!(ValidatorStatus::from_u8(3).is_err());
@@ -353,7 +360,7 @@ mod tests {
     #[test]
     fn test_validator_account_invalid_status() {
         let mut buf = BytesMut::new();
-        
+
         // Create a buffer with valid data except for an invalid status byte
         buf.put(&[1u8; 32][..]); // ed25519_pubkey
         buf.put(&[2u8; 20][..]); // withdrawal_credentials
