@@ -12,10 +12,9 @@ use commonware_consensus::Reporter;
 use commonware_macros::select;
 use commonware_runtime::buffer::PoolRef;
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
-use commonware_storage::metadata::{Config, Metadata};
 use commonware_storage::translator::TwoCap;
+use commonware_utils::hex;
 use commonware_utils::{NZU64, NZUsize};
-use commonware_utils::{hex, sequence::FixedBytes};
 use futures::{
     SinkExt as _, StreamExt,
     channel::{mpsc, oneshot},
@@ -25,12 +24,11 @@ use metrics::{counter, histogram};
 use rand::Rng;
 use summit_types::Block;
 use summit_types::account::{ValidatorAccount, ValidatorStatus};
-use summit_types::execution_request::{DepositRequest, ExecutionRequest, WithdrawalRequest};
+use summit_types::execution_request::ExecutionRequest;
 use summit_types::withdrawal::PendingWithdrawal;
-use summit_utils::persistent_queue::{Config as PersistentQueueConfig, PersistentQueue};
+use summit_utils::persistent_queue::Config as PersistentQueueConfig;
 use tracing::{info, warn};
 
-const LATEST_KEY: [u8; 1] = [0u8];
 const PAGE_SIZE: usize = 77;
 const PAGE_CACHE_SIZE: usize = 9;
 

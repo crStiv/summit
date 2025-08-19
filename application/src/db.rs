@@ -272,6 +272,7 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
         self.update_deposit_tail(tail_value + 1).await;
     }
 
+    #[allow(unused)]
     pub async fn peek_deposit(&self) -> Option<DepositRequest>
     where
         DepositRequest: Clone,
@@ -413,6 +414,7 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
         self.update_withdrawal_tail(tail_value + 1).await;
     }
 
+    #[allow(unused)]
     pub async fn peek_withdrawal(&self) -> Option<PendingWithdrawal>
     where
         PendingWithdrawal: Clone,
@@ -594,7 +596,7 @@ mod tests {
     use commonware_utils::{NZU64, NZUsize};
     use summit_types::PublicKey;
     use summit_types::account::{ValidatorAccount, ValidatorStatus};
-    use summit_types::execution_request::{DepositRequest, WithdrawalRequest};
+    use summit_types::execution_request::DepositRequest;
     use summit_types::withdrawal::PendingWithdrawal;
 
     async fn create_test_db_with_context<E: Clock + Storage + Metrics>(
@@ -1033,6 +1035,7 @@ mod tests {
         }
     }
 
+    #[allow(unused)]
     fn create_invalid_withdrawal_credentials_deposit(
         index: u64,
         amount: u64,
