@@ -394,6 +394,7 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
                 amount: request.amount,
             },
             withdrawal_height,
+            bls_pubkey: request.validator_pubkey,
         };
 
         self.push_withdrawal(pending_withdrawal).await;
@@ -624,6 +625,7 @@ mod tests {
                 amount,
             },
             withdrawal_height: index * 100, // Some height value
+            bls_pubkey: [index as u8; 48], // Use index as bls_pubkey pattern
         }
     }
 
@@ -853,6 +855,7 @@ mod tests {
                     amount: 16000000000,
                 },
                 withdrawal_height: 100, // Ready at height 100
+                bls_pubkey: [1u8; 48],
             };
 
             let withdrawal2 = PendingWithdrawal {
@@ -863,6 +866,7 @@ mod tests {
                     amount: 24000000000,
                 },
                 withdrawal_height: 150, // Ready at height 150
+                bls_pubkey: [2u8; 48],
             };
 
             let withdrawal3 = PendingWithdrawal {
@@ -873,6 +877,7 @@ mod tests {
                     amount: 32000000000,
                 },
                 withdrawal_height: 200, // Ready at height 200
+                bls_pubkey: [3u8; 48],
             };
 
             db.push_withdrawal(withdrawal1.clone()).await;

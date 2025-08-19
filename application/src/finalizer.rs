@@ -252,6 +252,15 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                 // verified when the block is verified. it is too late when the block is committed.
                                 let pending_withdrawal = pending_withdrawal.expect("pending withdrawal must be in state");
                                 assert_eq!(pending_withdrawal.inner, withdrawal);
+
+                                if let Some(mut account) = self.state.get_account(&pending_withdrawal.bls_pubkey).await {
+                                    if account.amount >= withdrawal.amount {
+                                        // This check should never fail, because we checked the balance when
+                                        // adding the pending withdrawal to the queue
+                                        account.amount -= withdrawal.amount;
+                                        self.state.set_account(&pending_withdrawal.bls_pubkey, account).await;
+                                    }
+                                }
                             }
 
                             // TODO(matthias): verify what happens if the binary shuts down before storing the deposits to disk.
