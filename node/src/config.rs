@@ -102,7 +102,7 @@ impl<C: EngineClient> EngineConfig<C> {
 }
 
 pub(crate) fn load_signer(key_path: &str) -> anyhow::Result<PrivateKey> {
-    read_ed_key_from_path(&key_path).context("failed to load signer key")
+    read_ed_key_from_path(key_path).context("failed to load signer key")
 }
 
 pub(crate) fn load_share(poly_share_path: &str) -> anyhow::Result<Share> {
@@ -120,15 +120,14 @@ pub(crate) fn expect_keys(key_path: &str, poly_share_path: &str) -> (PrivateKey,
     let (signer, share) = match (signer_res, share_res) {
         (Ok(signer), Ok(share)) => (signer, share),
         (Err(signer_err), Ok(_)) => {
-            panic!("\nSigner error @ path {}: {}\n", key_path, signer_err);
+            panic!("\nSigner error @ path {key_path}: {signer_err}\n");
         }
         (Ok(_), Err(share_err)) => {
-            panic!("\nShare error @ path {}: {}\n", poly_share_path, share_err);
+            panic!("\nShare error @ path {poly_share_path}: {share_err}\n");
         }
         (Err(signer_err), Err(share_err)) => {
             panic!(
-                "\nFailed to load signer and share keys\nSigner error @ path {}: {}\nShare  error @ path {}: {}\n",
-                key_path, signer_err, poly_share_path, share_err
+                "\nFailed to load signer and share keys\nSigner error @ path {key_path}: {signer_err}\nShare  error @ path {poly_share_path}: {share_err}\n",
             );
         }
     };

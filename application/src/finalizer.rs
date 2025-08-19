@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::Registry;
-use crate::db::FinalizerState;
+use crate::db::{Config as StateConfig, FinalizerState};
 use crate::engine_client::EngineClient;
 use alloy_primitives::Address;
 use alloy_rpc_types_engine::ForkchoiceState;
@@ -26,7 +26,6 @@ use summit_types::Block;
 use summit_types::account::{ValidatorAccount, ValidatorStatus};
 use summit_types::execution_request::ExecutionRequest;
 use summit_types::withdrawal::PendingWithdrawal;
-use summit_utils::persistent_queue::Config as PersistentQueueConfig;
 use tracing::{info, warn};
 
 const PAGE_SIZE: usize = 77;
@@ -86,7 +85,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         mpsc::Sender<(u64, oneshot::Sender<()>)>,
         mpsc::Sender<(u64, oneshot::Sender<Vec<PendingWithdrawal>>)>,
     ) {
-        let state_cfg = PersistentQueueConfig {
+        let state_cfg = StateConfig {
             log_journal_partition: format!("{db_prefix}-finalizer_state-log"),
             log_write_buffer: NZUsize!(64 * 1024),
             log_compression: None,
