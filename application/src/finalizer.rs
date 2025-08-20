@@ -1,11 +1,7 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
-
 use crate::Registry;
 use crate::db::{Config as StateConfig, FinalizerState};
 use crate::engine_client::EngineClient;
+use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::Address;
 use alloy_rpc_types_engine::ForkchoiceState;
 use commonware_consensus::Reporter;
@@ -22,6 +18,10 @@ use futures::{
 #[cfg(feature = "prom")]
 use metrics::{counter, histogram};
 use rand::Rng;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 use summit_types::Block;
 use summit_types::account::{ValidatorAccount, ValidatorStatus};
 use summit_types::execution_request::ExecutionRequest;
@@ -164,7 +164,16 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                         // check the payload
                         let payload_status = self.engine_client.check_payload(&block).await;
                         let new_height = block.height;
-                        if payload_status.is_valid() {
+
+                        // Verify withdrawal requests that were included in the block
+                        // Make sure that the included withdrawals match the expected withdrawals
+                        let pending_withdrawals = self.state
+                            .get_next_ready_withdrawals(new_height, self.validator_max_withdrawals_per_block)
+                            .await;
+                        let expected_withdrawals: Vec<Withdrawal> =
+                            pending_withdrawals.into_iter().map(|w| w.inner).collect();
+
+                        if payload_status.is_valid() && block.payload.payload_inner.withdrawals == expected_withdrawals {
                             let eth_hash = block.eth_block_hash();
 
                             info!("Commiting block 0x{} for height {}", hex(&eth_hash), new_height);

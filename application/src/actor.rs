@@ -18,7 +18,6 @@ use futures::{
 };
 use rand::Rng;
 
-use alloy_eips::eip4895::Withdrawal;
 use futures::task::{Context, Poll};
 use std::{
     pin::Pin,
@@ -194,33 +193,13 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                     // continue processing other messages)
                     self.context.with_label("verify").spawn({
                         let mut marshal = marshal.clone();
-                        let mut tx_pending_withdrawal = self.tx_pending_withdrawal.clone();
-                        let mut tx_height_notify = self.tx_height_notify.clone();
                         move |_| async move {
                             let requester = try_join(parent_request, block_request);
                             select! {
                                 result = requester => {
                                     let (parent, block) = result.unwrap();
 
-                                    // now that we have the parent additionally await for that to be executed by the finalizer
-                                    let (tx, rx) = oneshot::channel();
-                                    tx_height_notify
-                                        .try_send((parent.height, tx))
-                                        .expect("finalizer dropped");
-
-                                    // await for notification
-                                    rx.await.expect("Finalizer dropped");
-
-                                    // Request pending withdrawals
-                                    let (tx, rx) = oneshot::channel();
-                                    tx_pending_withdrawal
-                                        .try_send((parent.height, tx))
-                                        .expect("finalizer dropped");
-
-                                    // await response
-                                    let pending_withdrawals = rx.await.expect("finalizer dropped");
-
-                                    if handle_verify(&block, parent, pending_withdrawals) {
+                                    if handle_verify(&block, parent) {
 
                                         // persist valid block
                                         marshal.verified(view, block).await;
@@ -315,11 +294,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
     }
 }
 
-fn handle_verify(
-    block: &Block,
-    parent: Block,
-    pending_withdrawals: Vec<PendingWithdrawal>,
-) -> bool {
+fn handle_verify(block: &Block, parent: Block) -> bool {
     if block.eth_parent_hash() != parent.eth_block_hash() {
         return false;
     }
@@ -330,13 +305,6 @@ fn handle_verify(
         return false;
     }
     if block.timestamp <= parent.timestamp {
-        return false;
-    }
-
-    let expected_withdrawals: Vec<Withdrawal> =
-        pending_withdrawals.into_iter().map(|w| w.inner).collect();
-    // Make sure that the included withdrawals match the expected withdrawals
-    if parent.payload.payload_inner.withdrawals != expected_withdrawals {
         return false;
     }
 
