@@ -86,14 +86,14 @@ impl Registry {
         Ok(())
     }
 
-    pub fn remove_participant(&mut self, participant: PublicKey, index: View) -> Result<()> {
+    pub fn remove_participant(&mut self, participant: &PublicKey, index: View) -> Result<()> {
         let mut views = self.views.write().unwrap();
         if let Some(current_view) = views.last_entry() {
             // TODO(matthias): is it possible that `index` is smaller or equal to the latest view?
             assert!(*current_view.key() < index);
             let mut participants = current_view.get().clone();
 
-            let Some(participant_index) = participants.participants_map.get(&participant).copied()
+            let Some(participant_index) = participants.participants_map.get(participant).copied()
             else {
                 return Err(anyhow::anyhow!(
                     "Public key {} doesn't exist in current set",
@@ -104,7 +104,7 @@ impl Registry {
             participants
                 .participants
                 .swap_remove(participant_index as usize);
-            participants.participants_map.remove(&participant);
+            participants.participants_map.remove(participant);
 
             // re-calculate the index of the swapped public key
             if let Some(swapped_key) = participants.participants.get(participant_index as usize) {
@@ -369,7 +369,7 @@ mod tests {
         let participant_to_remove = registry.participants(0).unwrap()[1].clone();
 
         // Remove participant from view 1
-        let result = registry.remove_participant(participant_to_remove.clone(), 1);
+        let result = registry.remove_participant(&participant_to_remove.clone(), 1);
         assert!(result.is_ok());
 
         // Verify participant was removed
@@ -392,7 +392,7 @@ mod tests {
         let nonexistent_participant = summit_types::PrivateKey::from_seed(999).public_key();
 
         // Try to remove non-existent participant
-        let result = registry.remove_participant(nonexistent_participant, 1);
+        let result = registry.remove_participant(&nonexistent_participant, 1);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("doesn't exist"));
     }

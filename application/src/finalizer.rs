@@ -288,7 +288,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             // then everything should work normally, because the registry is not persisted to disk
                                             if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone(), last_indexed) {
                                                 // This only happens if the key already exists
-                                                warn!("Failed to add validator: {}", e);
+                                                warn!("failed to add validator: {}", e);
                                             }
                                         }
                                     }
@@ -314,6 +314,9 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                         // An argument can be made from removing the validator account from the DB here.
                                         if account.balance == 0 {
                                             account.status = ValidatorStatus::Inactive;
+                                            if let Err(e) = self.registry.remove_participant(&account.ed25519_pubkey, last_indexed) {
+                                                warn!("failed to add validator: {}", e);
+                                            }
                                         }
 
                                         self.state.set_account(&pending_withdrawal.bls_pubkey, account).await;
