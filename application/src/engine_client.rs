@@ -17,6 +17,7 @@ engine_newPayloadV3 : This is called to store(not commit) and validate blocks re
     we should attest if the block is valid. If it is valid and we reach quorom when we call engine_forkchoiceUpdatedV3 it will set this block to head
 
 */
+use alloy_eips::eip4895::Withdrawal;
 use alloy_provider::{RootProvider, ext::EngineApi, network::Ethereum};
 use alloy_rpc_types_engine::{
     ExecutionPayloadEnvelopeV4, ForkchoiceState, JwtSecret, PayloadAttributes, PayloadId,
@@ -35,6 +36,7 @@ pub trait EngineClient: Clone + Send + Sync + 'static {
         &self,
         fork_choice_state: ForkchoiceState,
         timestamp: u64,
+        withdrawals: Vec<Withdrawal>,
     ) -> impl Future<Output = Option<PayloadId>> + Send;
 
     fn get_payload(
@@ -88,13 +90,14 @@ impl EngineClient for RethEngineClient {
         &self,
         fork_choice_state: ForkchoiceState,
         timestamp: u64,
+        withdrawals: Vec<Withdrawal>,
     ) -> Option<PayloadId> {
         let payload_attributes = PayloadAttributes {
             timestamp,
             prev_randao: [0; 32].into(),
             // todo(dalton): this should be the validators public key
             suggested_fee_recipient: [1; 20].into(),
-            withdrawals: Some(Vec::new()),
+            withdrawals: Some(withdrawals),
             // todo(dalton): we should make this something that we can associate with the simplex height
             parent_beacon_block_root: Some([1; 32].into()),
         };

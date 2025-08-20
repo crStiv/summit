@@ -263,23 +263,17 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             forkchoice_clone = *self.forkchoice.lock().expect("poisoned");
         }
 
+        // Add pending withdrawals to the block
+        let withdrawals = pending_withdrawals.into_iter().map(|w| w.inner).collect();
         let payload_id = self
             .engine_client
-            .start_building_block(forkchoice_clone, current)
+            .start_building_block(forkchoice_clone, current, withdrawals)
             .await
             .ok_or(anyhow!("Unable to build payload"))?;
 
         self.context.sleep(Duration::from_millis(50)).await;
 
-        let mut payload_envelope = self.engine_client.get_payload(payload_id).await;
-
-        // Add pending withdrawals to the block
-        let withdrawals = pending_withdrawals.into_iter().map(|w| w.inner).collect();
-        payload_envelope
-            .envelope_inner
-            .execution_payload
-            .payload_inner
-            .withdrawals = withdrawals;
+        let payload_envelope = self.engine_client.get_payload(payload_id).await;
 
         let block = Block::compute_digest(
             parent.digest,
