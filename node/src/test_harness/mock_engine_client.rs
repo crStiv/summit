@@ -1,4 +1,6 @@
+use alloy_eips::eip4895::Withdrawal;
 use alloy_eips::eip7685::Requests;
+use alloy_primitives::hex;
 use alloy_primitives::{Address, B256, Bloom, Bytes, FixedBytes, U256};
 use alloy_rpc_types_engine::{
     BlobsBundleV1, ExecutionPayloadEnvelopeV3, ExecutionPayloadEnvelopeV4, ExecutionPayloadV1,
@@ -229,6 +231,7 @@ impl EngineClient for MockEngineClient {
         &self,
         fork_choice_state: ForkchoiceState,
         timestamp: u64,
+        _withdrawals: Vec<Withdrawal>,
     ) -> Option<PayloadId> {
         let mut state = self.state.lock().unwrap();
 
@@ -406,6 +409,26 @@ impl MockEngineNetwork {
         clients.clone()
     }
 
+    /// Print all canonical chains for debugging consensus issues
+    fn print_all_canonical_chains(&self, until_block: Option<u64>, error_type: &str) {
+        let clients = self.get_clients();
+        println!("=== CONSENSUS ERROR: {} ===", error_type);
+        for client in &clients {
+            let chain = client.get_canonical_chain();
+            let height = until_block.unwrap_or(client.get_chain_height());
+            println!("Client {}: height={}", client.client_id(), height);
+            for (block_number, block_hash) in &chain {
+                if until_block.is_none() || *block_number <= height {
+                    println!(
+                        "  Block {}: {}",
+                        block_number,
+                        hex::encode(block_hash.as_slice())
+                    );
+                }
+            }
+        }
+    }
+
     /// Check if all clients have the same canonical chain (consensus)
     pub fn verify_consensus(&self, until_block: Option<u64>) -> Result<(), String> {
         let clients = self.get_clients();
@@ -414,14 +437,23 @@ impl MockEngineNetwork {
             return Ok(());
         }
 
-        let reference_chain = clients[0].get_canonical_chain();
         let reference_height = until_block.unwrap_or(clients[0].get_chain_height());
+        let reference_chain: Vec<(u64, _)> = clients[0]
+            .get_canonical_chain()
+            .into_iter()
+            .filter(|(height, _)| *height <= reference_height)
+            .collect();
 
         for client in clients.iter().skip(1) {
-            let client_chain = client.get_canonical_chain();
             let client_height = until_block.unwrap_or(client.get_chain_height());
+            let client_chain: Vec<(u64, _)> = client
+                .get_canonical_chain()
+                .into_iter()
+                .filter(|(height, _)| *height <= client_height)
+                .collect();
 
             if client_height != reference_height {
+                self.print_all_canonical_chains(until_block, "HEIGHT MISMATCH");
                 return Err(format!(
                     "Height mismatch: {} has {}, {} has {}",
                     clients[0].client_id(),
@@ -432,6 +464,7 @@ impl MockEngineNetwork {
             }
 
             if client_chain != reference_chain {
+                self.print_all_canonical_chains(until_block, "CHAIN MISMATCH");
                 return Err(format!(
                     "Chain mismatch: {} differs from {}",
                     client.client_id(),
@@ -476,7 +509,7 @@ mod tests {
         };
 
         let payload_id = client
-            .start_building_block(genesis_state, 1000)
+            .start_building_block(genesis_state, 1000, vec![])
             .await
             .unwrap();
         let envelope = client.get_payload(payload_id).await;
@@ -538,7 +571,7 @@ mod tests {
         };
 
         let payload_id = client1
-            .start_building_block(genesis_state, 1000)
+            .start_building_block(genesis_state, 1000, vec![])
             .await
             .unwrap();
         let envelope = client1.get_payload(payload_id).await;
@@ -609,7 +642,7 @@ mod tests {
             };
 
             let payload_id = producer
-                .start_building_block(fork_choice, (round * 1000) as u64)
+                .start_building_block(fork_choice, (round * 1000) as u64, vec![])
                 .await
                 .unwrap();
             let envelope = producer.get_payload(payload_id).await;
@@ -683,7 +716,7 @@ mod tests {
 
         // Client1 builds block A
         let payload_id_a = client1
-            .start_building_block(genesis_state, 1000)
+            .start_building_block(genesis_state, 1000, vec![])
             .await
             .unwrap();
         let envelope_a = client1.get_payload(payload_id_a).await;
@@ -691,7 +724,7 @@ mod tests {
 
         // Client2 builds block B (different from A due to client_id in hash)
         let payload_id_b = client2
-            .start_building_block(genesis_state, 1000)
+            .start_building_block(genesis_state, 1000, vec![])
             .await
             .unwrap();
         let envelope_b = client2.get_payload(payload_id_b).await;

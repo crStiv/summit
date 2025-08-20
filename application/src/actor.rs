@@ -24,6 +24,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use summit_types::withdrawal::PendingWithdrawal;
 use summit_types::{Block, Digest};
 use tracing::{error, info, warn};
 
@@ -32,7 +33,7 @@ struct ChannelClosedFuture<'a, T> {
     sender: &'a mut oneshot::Sender<T>,
 }
 
-impl<T> futures::Future for ChannelClosedFuture<'_, T> {
+impl<T> Future for ChannelClosedFuture<'_, T> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -60,6 +61,7 @@ pub struct Actor<
     built_block: Arc<Mutex<Option<Block>>>,
     finalizer: Option<Finalizer<R, C>>,
     tx_height_notify: mpsc::Sender<(u64, oneshot::Sender<()>)>,
+    tx_pending_withdrawal: mpsc::Sender<(u64, oneshot::Sender<Vec<PendingWithdrawal>>)>,
     genesis_hash: [u8; 32],
 }
 
@@ -76,17 +78,20 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             finalized_block_hash: genesis_hash.into(),
         }));
 
-        let (finalizer, finalizer_mailbox, tx_height_notify) = Finalizer::new(
-            context.with_label("finalizer"),
-            cfg.engine_client.clone(),
-            cfg.registry,
-            forkchoice.clone(),
-            cfg.partition_prefix,
-            cfg.validator_onboarding_interval,
-            cfg.validator_onboarding_limit_per_block,
-            cfg.validator_minimum_stake,
-        )
-        .await;
+        let (finalizer, finalizer_mailbox, tx_height_notify, tx_pending_withdrawal) =
+            Finalizer::new(
+                context.with_label("finalizer"),
+                cfg.engine_client.clone(),
+                cfg.registry,
+                forkchoice.clone(),
+                cfg.partition_prefix,
+                cfg.validator_onboarding_interval,
+                cfg.validator_onboarding_limit_per_block,
+                cfg.validator_minimum_stake,
+                cfg.validator_withdrawal_period,
+                cfg.validator_max_withdrawals_per_block,
+            )
+            .await;
 
         (
             Self {
@@ -97,6 +102,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 built_block: Arc::new(Mutex::new(None)),
                 finalizer: Some(finalizer),
                 tx_height_notify,
+                tx_pending_withdrawal,
                 genesis_hash,
             },
             Mailbox::new(tx),
@@ -192,6 +198,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                             select! {
                                 result = requester => {
                                     let (parent, block) = result.unwrap();
+
                                     if handle_verify(&block, parent) {
 
                                         // persist valid block
@@ -238,6 +245,15 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         // await for notification
         rx.await.expect("Finalizer dropped");
 
+        // Request pending withdrawals
+        let (tx, rx) = oneshot::channel();
+        self.tx_pending_withdrawal
+            .try_send((parent.height, tx))
+            .expect("finalizer dropped");
+
+        // await response
+        let pending_withdrawals = rx.await.expect("finalizer dropped");
+
         let mut current = self.context.current().epoch_millis();
         if current <= parent.timestamp {
             current = parent.timestamp + 1;
@@ -247,9 +263,11 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             forkchoice_clone = *self.forkchoice.lock().expect("poisoned");
         }
 
+        // Add pending withdrawals to the block
+        let withdrawals = pending_withdrawals.into_iter().map(|w| w.inner).collect();
         let payload_id = self
             .engine_client
-            .start_building_block(forkchoice_clone, current)
+            .start_building_block(forkchoice_clone, current, withdrawals)
             .await
             .ok_or(anyhow!("Unable to build payload"))?;
 
@@ -283,5 +301,6 @@ fn handle_verify(block: &Block, parent: Block) -> bool {
     if block.timestamp <= parent.timestamp {
         return false;
     }
+
     true
 }

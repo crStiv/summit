@@ -5035,11 +5035,14 @@ dependencies = [
 name = "summit-application"
 version = "0.0.0"
 dependencies = [
+ "alloy-eips",
+ "alloy-primitives",
  "alloy-provider",
  "alloy-rpc-client",
  "alloy-rpc-types-engine",
  "alloy-transport-http",
  "anyhow",
+ "bytes",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
@@ -5054,7 +5057,6 @@ dependencies = [
  "metrics",
  "rand 0.8.5",
  "summit-types",
- "summit-utils",
  "tower",
  "tracing",
 ]
@@ -5076,18 +5078,6 @@ dependencies = [
  "ethereum_ssz_derive",
  "serde",
  "toml",
-]
-
-[[package]]
-name = "summit-utils"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "commonware-codec",
- "commonware-runtime",
- "commonware-storage",
- "commonware-utils",
- "tokio",
 ]
 
 [[package]]
