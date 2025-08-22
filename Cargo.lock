@@ -5055,6 +5055,7 @@ dependencies = [
  "governor",
  "http-body-util",
  "metrics",
+ "prometheus-client",
  "rand 0.8.5",
  "summit-types",
  "tower",

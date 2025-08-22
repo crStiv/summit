@@ -3,6 +3,8 @@ use crate::db::{Config as StateConfig, FinalizerState};
 use crate::engine_client::EngineClient;
 use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::Address;
+#[cfg(debug_assertions)]
+use alloy_primitives::hex;
 use alloy_rpc_types_engine::ForkchoiceState;
 use commonware_consensus::Reporter;
 use commonware_macros::select;
@@ -17,6 +19,8 @@ use futures::{
 };
 #[cfg(feature = "prom")]
 use metrics::{counter, histogram};
+#[cfg(debug_assertions)]
+use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{
     collections::BTreeMap,
@@ -127,7 +131,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
     }
 
     pub fn start(mut self) {
-        self.context.spawn(move |_| async move {
+        self.context.spawn(move |ctx| async move {
             #[cfg(feature = "prom")]
             let mut last_committed_timestamp: Option<std::time::Instant> = None;
             loop {
@@ -291,6 +295,13 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             };
                                             self.state.set_account(&request.bls_pubkey, new_account).await;
                                             validator_balance = request.amount;
+
+                                            #[cfg(debug_assertions)]
+                                            {
+                                                let gauge: Gauge = Gauge::default();
+                                                gauge.set(validator_balance as i64);
+                                                ctx.register(format!("<pubkey>{}</pubkey>_validator_balance", hex::encode(request.bls_pubkey)), "Validator balance", gauge);
+                                            }
                                         }
                                         if validator_balance > self.validator_minimum_stake {
                                             // If the node shuts down, before the account changes are committed,
@@ -324,7 +335,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                         if account.balance == 0 {
                                             account.status = ValidatorStatus::Inactive;
                                             if let Err(e) = self.registry.remove_participant(&account.ed25519_pubkey, last_indexed) {
-                                                warn!("failed to add validator: {}", e);
+                                                warn!("failed to remove validator: {}", e);
                                             }
                                         }
 
