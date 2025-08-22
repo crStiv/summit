@@ -5,7 +5,10 @@ use commonware_cryptography::{
 
 use crate::test_harness::mock_engine_client::MockEngineNetwork;
 use crate::{config::EngineConfig, engine::Engine};
+use alloy_eips::eip7685::Requests;
+use alloy_primitives::Bytes;
 use alloy_signer::k256::elliptic_curve::rand_core::OsRng;
+use commonware_codec::{DecodeExt, Write};
 use commonware_p2p::simulated::{self, Link, Network, Oracle, Receiver, Sender};
 use commonware_runtime::{
     Clock, Metrics, Runner as _,
@@ -18,9 +21,12 @@ use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU32,
 };
+use summit_types::execution_request::{DepositRequest, ExecutionRequest};
 use summit_types::{PrivateKey, PublicKey};
 
-async fn link_validators(
+pub const GENESIS_HASH: &str = "0x683713729fcb72be6f3d8b88c8cda3e10569d73b9640d3bf6f5184d94bd97616";
+
+pub async fn link_validators(
     oracle: &mut Oracle<PublicKey>,
     validators: &[PublicKey],
     link: Link,
@@ -49,7 +55,7 @@ async fn link_validators(
     }
 }
 
-async fn register_validators(
+pub async fn register_validators(
     oracle: &mut Oracle<PublicKey>,
     validators: &[PublicKey],
 ) -> HashMap<
@@ -88,11 +94,11 @@ async fn register_validators(
     registrations
 }
 
-pub fn all_online(
+pub fn run_until_height(
     n: u32,
     seed: u64,
     link: Link,
-    run_until_height: u64,
+    stop_height: u64,
     verify_consensus: bool,
 ) -> String {
     // Create context
@@ -128,10 +134,7 @@ pub fn all_online(
         link_validators(&mut oracle, &validators, link, None).await;
 
         // Create the engine clients
-        let genesis_hash = from_hex_formatted(
-            "0x683713729fcb72be6f3d8b88c8cda3e10569d73b9640d3bf6f5184d94bd97616",
-        )
-        .expect("failed to decode genesis hash");
+        let genesis_hash = from_hex_formatted(GENESIS_HASH).expect("failed to decode genesis hash");
         let genesis_hash: [u8; 32] = genesis_hash
             .try_into()
             .expect("failed to convert genesis hash");
@@ -154,10 +157,7 @@ pub fn all_online(
             let engine_client = engine_client_network.create_client(uid.clone());
             let config = EngineConfig {
                 engine_client,
-                //blocker: oracle.control(public_key.clone()),
                 partition_prefix: uid.clone(),
-                //blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
-                //finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                 genesis_hash,
                 namespace,
                 signer,
@@ -177,7 +177,6 @@ pub fn all_online(
                 _max_fetch_size: 1024 * 512,
                 fetch_concurrent: 10,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
-                //indexer: None,
             };
             let engine = Engine::new(
                 context.with_label(&uid),
@@ -221,7 +220,7 @@ pub fn all_online(
                 // If ends with contiguous_height, ensure it is at least required_container
                 if metric.ends_with("_marshal_processed_height") {
                     let value = value.parse::<u64>().unwrap();
-                    if value >= run_until_height {
+                    if value >= stop_height {
                         num_nodes_finished += 1;
                         if num_nodes_finished == n {
                             success = true;
@@ -241,11 +240,112 @@ pub fn all_online(
         if verify_consensus {
             assert!(
                 engine_client_network
-                    .verify_consensus(Some(run_until_height))
+                    .verify_consensus(Some(stop_height))
                     .is_ok()
             );
         }
 
         context.auditor().state()
     })
+}
+
+/// Parse a substring from a metric name using XML-like tags
+///
+/// # Arguments
+/// * `metric` - The metric name to parse from
+/// * `tag` - The tag name to look for (e.g., "pubkey")
+///
+/// # Returns
+/// * `Some(String)` if the tag is found and parsed successfully
+/// * `None` if the tag is not found or parsing fails
+///
+/// # Example
+/// ```
+/// let metric = "validator-node1_application_finalizer_<pubkey>abcdef123456</pubkey>_validator_balance";
+/// let pubkey = parse_metric_substring(metric, "pubkey");
+/// assert_eq!(pubkey, Some("abcdef123456".to_string()));
+/// ```
+pub fn parse_metric_substring(metric: &str, tag: &str) -> Option<String> {
+    let start_tag = format!("<{}>", tag);
+    let end_tag = format!("</{}>", tag);
+
+    let start = metric.find(&start_tag)?;
+    let end = metric.find(&end_tag)?;
+
+    // Make sure end tag comes after start tag
+    if end <= start {
+        return None;
+    }
+
+    let substring_start = start + start_tag.len();
+    Some(metric[substring_start..end].to_string())
+}
+
+/// Create a list of n DepositRequests for testing
+///
+/// # Arguments
+/// * `n` - The number of deposit requests to create
+///
+/// # Returns
+/// * `Vec<DepositRequest>` - A vector containing n deposit requests with valid test data
+pub fn create_deposit_requests(n: usize) -> Vec<DepositRequest> {
+    let mut deposits = Vec::new();
+
+    for i in 0..n {
+        // Create valid Eth1 withdrawal credentials: 0x01 + 11 zero bytes + 20-byte address
+        let mut withdrawal_credentials = [0u8; 32];
+        withdrawal_credentials[0] = 0x01; // Eth1 withdrawal prefix
+        // Use a deterministic address pattern for the last 20 bytes
+        for j in 0..20 {
+            withdrawal_credentials[12 + j] = ((i + j) % 256) as u8;
+        }
+
+        // Create deterministic but valid keys for each deposit
+        let mut ed25519_seed = [1u8; 32];
+        ed25519_seed[0] = (i % 256) as u8;
+        ed25519_seed[1] = ((i / 256) % 256) as u8;
+
+        let mut bls_pubkey = [0u8; 48];
+        for j in 0..48 {
+            bls_pubkey[j] = ((i + j + 1) % 256) as u8;
+        }
+
+        let mut signature = [0u8; 96];
+        for j in 0..96 {
+            signature[j] = ((i + j + 2) % 256) as u8;
+        }
+
+        let deposit = DepositRequest {
+            ed25519_pubkey: PublicKey::decode(&ed25519_seed[..]).expect("valid ed25519 key"),
+            bls_pubkey,
+            withdrawal_credentials,
+            amount: 32_000_000_000 + (i as u64 * 1_000_000_000), // 32+ ETH in gwei, slightly different for each
+            signature,
+            index: i as u64 + 1,
+        };
+
+        deposits.push(deposit);
+    }
+
+    deposits
+}
+
+/// Convert a list of ExecutionRequests to Requests
+///
+/// # Arguments
+/// * `execution_requests` - A vector of ExecutionRequest instances
+///
+/// # Returns
+/// * `Requests` - The corresponding Requests value for use with the engine
+pub fn execution_requests_to_requests(execution_requests: Vec<ExecutionRequest>) -> Requests {
+    let mut requests_bytes = Vec::new();
+
+    for execution_request in execution_requests {
+        // Serialize the ExecutionRequest to bytes
+        let mut request_bytes = Vec::new();
+        execution_request.write(&mut request_bytes);
+        requests_bytes.push(Bytes::from(request_bytes));
+    }
+
+    Requests::from(requests_bytes)
 }
