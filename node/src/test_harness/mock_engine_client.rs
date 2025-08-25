@@ -81,6 +81,41 @@ impl MockEngineClient {
         chain
     }
 
+    /// Get all withdrawals from the canonical chain
+    pub fn get_withdrawals(&self) -> HashMap<u64, Vec<Withdrawal>> {
+        let canonical_chain = self.get_canonical_chain();
+        let state = self.state.lock().unwrap();
+        let mut withdrawals = HashMap::new();
+        for (height, block_hash) in canonical_chain {
+            // First try canonical_blocks (committed blocks)
+            let block = if let Some(block) = state.canonical_blocks.get(&block_hash) {
+                Some(block.clone())
+            } else {
+                // Fallback to building_payloads (uncommitted blocks)
+                state
+                    .building_payloads
+                    .values()
+                    .find(|envelope| {
+                        envelope
+                            .envelope_inner
+                            .execution_payload
+                            .payload_inner
+                            .payload_inner
+                            .block_hash
+                            == block_hash
+                    })
+                    .map(|envelope| envelope.envelope_inner.execution_payload.clone())
+            };
+            
+            if let Some(block) = block {
+                if !block.payload_inner.withdrawals.is_empty() {
+                    withdrawals.insert(height, block.payload_inner.withdrawals);
+                }
+            }
+        }
+        withdrawals
+    }
+
     #[allow(unused)]
     /// Check if a block exists in canonical chain
     pub fn has_block(&self, block_hash: FixedBytes<32>) -> bool {
@@ -529,6 +564,13 @@ impl MockEngineNetwork {
             Ok(clients[0].get_chain_height())
         }
     }
+
+    /// Get all withdrawals from the canonical chain
+    pub fn get_withdrawals(&self) -> HashMap<u64, Vec<Withdrawal>> {
+        let clients = self.get_clients();
+        let withdrawals = clients[0].get_withdrawals();
+        withdrawals
+    }
 }
 
 #[cfg(test)]
@@ -739,6 +781,79 @@ mod tests {
             assert_eq!(chain.len(), 4); // genesis + 3 blocks
             println!("{} chain: {:?}", client.client_id(), chain);
         }
+    }
+
+    #[tokio::test]
+    async fn test_network_get_withdrawals() {
+        let genesis_hash = [0; 32];
+        let network = MockEngineNetwork::new(genesis_hash);
+
+        let client1 = network.create_client("client1".to_string());
+        let client2 = network.create_client("client2".to_string());
+
+        // Create a withdrawal for testing
+        let withdrawal = Withdrawal {
+            index: 0,
+            validator_index: 1,
+            address: Address::from([1u8; 20]),
+            amount: 32_000_000_000, // 32 ETH in wei
+        };
+
+        // Start building block with withdrawal
+        let genesis_state = ForkchoiceState {
+            head_block_hash: FixedBytes::from(genesis_hash),
+            safe_block_hash: FixedBytes::from(genesis_hash),
+            finalized_block_hash: FixedBytes::from(genesis_hash),
+        };
+
+        let payload_id = client1
+            .start_building_block(genesis_state, 1000, vec![withdrawal.clone()])
+            .await
+            .unwrap();
+        
+        // Get the payload and modify it to include the withdrawal
+        let mut envelope = client1.get_payload(payload_id).await;
+        envelope.envelope_inner.execution_payload.payload_inner.withdrawals = vec![withdrawal.clone()];
+        
+        // Update the building payload with the withdrawal
+        {
+            let mut state = client1.state.lock().unwrap();
+            state.building_payloads.insert(payload_id, envelope.clone());
+        }
+
+        let block = envelope.envelope_inner.execution_payload.clone();
+
+        // Commit the block to both clients
+        let new_fork_choice = ForkchoiceState {
+            head_block_hash: block.payload_inner.payload_inner.block_hash,
+            safe_block_hash: FixedBytes::from(genesis_hash),
+            finalized_block_hash: FixedBytes::from(genesis_hash),
+        };
+
+        client1.commit_hash(new_fork_choice).await;
+
+        // Simulate network propagation to client2
+        let block_for_validation = Block {
+            payload: block.clone(),
+            digest: summit_types::Digest::from([1u8; 32]),
+            parent: summit_types::Digest::from([0u8; 32]),
+            height: 1,
+            timestamp: 1000,
+            block_value: alloy_primitives::U256::from(1_000_000_000_000_000_000u64),
+            execution_requests: Vec::new(),
+        };
+
+        client2.check_payload(&block_for_validation).await;
+        client2.commit_hash(new_fork_choice).await;
+
+        // Test that network.get_withdrawals() returns the withdrawal
+        let withdrawals = network.get_withdrawals();
+        
+        assert_eq!(withdrawals.len(), 1);
+        assert!(withdrawals.contains_key(&1));
+        let block_1_withdrawals = withdrawals.get(&1).unwrap();
+        assert_eq!(block_1_withdrawals.len(), 1);
+        assert_eq!(block_1_withdrawals[0], withdrawal);
     }
 
     #[tokio::test]
