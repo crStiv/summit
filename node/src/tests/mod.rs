@@ -4,7 +4,7 @@ use crate::test_harness::common::run_until_height;
 use commonware_macros::test_traced;
 use commonware_p2p::simulated::Link;
 
-#[test_traced]
+#[test_traced("INFO")]
 fn test_20_blocks_and_verify() {
     let link = Link {
         latency: 80.0,

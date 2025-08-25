@@ -307,7 +307,7 @@ pub fn create_deposit_requests(n: usize) -> Vec<DepositRequest> {
             ed25519_pubkey: PublicKey::decode(&ed25519_seed[..]).expect("valid ed25519 key"),
             bls_pubkey,
             withdrawal_credentials,
-            amount: 32_000_000_000 + (i as u64 * 1_000_000_000), // 32+ ETH in gwei, slightly different for each
+            amount: 32_000_000_000,
             signature,
             index: i as u64 + 1,
         };

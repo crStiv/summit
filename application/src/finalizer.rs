@@ -262,8 +262,13 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             if request.index > account.last_deposit_index {
                                                 account.balance += request.amount;
                                                 account.last_deposit_index = request.index;
-                                                validator_balance = account.balance;
+                                                #[allow(unused)]
+                                                #[cfg(debug_assertions)]
+                                                {
+                                                    validator_balance = account.balance;
+                                                }
                                                 account.last_deposit_index = request.index;
+                                                validator_balance = account.balance;
                                                 self.state.set_account(&request.bls_pubkey, account).await;
                                             }
                                         } else {
@@ -296,17 +301,17 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             self.state.set_account(&request.bls_pubkey, new_account).await;
                                             validator_balance = request.amount;
 
-                                            #[cfg(debug_assertions)]
-                                            {
-                                                let gauge: Gauge = Gauge::default();
-                                                gauge.set(validator_balance as i64);
-                                                ctx.register(
-                                                    format!("<creds>{}</creds><ed_key>{}</ed_key><bls_key>{}</bls_key>_validator_balance",
-                                                    hex::encode(request.withdrawal_credentials), request.ed25519_pubkey, hex::encode(request.bls_pubkey)),
-                                                    "Validator balance",
-                                                    gauge
-                                                );
-                                            }
+                                        }
+                                        #[cfg(debug_assertions)]
+                                        {
+                                            let gauge: Gauge = Gauge::default();
+                                            gauge.set(validator_balance as i64);
+                                            ctx.register(
+                                                format!("<creds>{}</creds><ed_key>{}</ed_key><bls_key>{}</bls_key>_validator_balance",
+                                                hex::encode(request.withdrawal_credentials), request.ed25519_pubkey, hex::encode(request.bls_pubkey)),
+                                                "Validator balance",
+                                                gauge
+                                            );
                                         }
                                         if validator_balance > self.validator_minimum_stake {
                                             // If the node shuts down, before the account changes are committed,
