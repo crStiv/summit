@@ -1,6 +1,9 @@
 use commonware_cryptography::{
     PrivateKeyExt, Signer,
-    bls12381::{dkg::ops, primitives::variant::MinPk},
+    bls12381::{
+        dkg::ops,
+        primitives::{group::Share, poly::Poly, variant::MinPk},
+    },
 };
 
 use crate::test_harness::mock_engine_client::MockEngineNetwork;
@@ -21,8 +24,9 @@ use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU32,
 };
+use summit_application::engine_client::EngineClient;
 use summit_types::execution_request::{DepositRequest, ExecutionRequest};
-use summit_types::{PrivateKey, PublicKey};
+use summit_types::{Identity, PrivateKey, PublicKey};
 
 pub const GENESIS_HASH: &str = "0x683713729fcb72be6f3d8b88c8cda3e10569d73b9640d3bf6f5184d94bd97616";
 
@@ -155,29 +159,18 @@ pub fn run_until_height(
             let namespace = String::from("_SEISMIC_BFT");
 
             let engine_client = engine_client_network.create_client(uid.clone());
-            let config = EngineConfig {
+
+            let config = get_default_engine_config(
                 engine_client,
-                partition_prefix: uid.clone(),
+                uid.clone(),
                 genesis_hash,
                 namespace,
                 signer,
-                polynomial: polynomial.clone(),
-                share: shares[idx].clone(),
-                participants: validators.clone(),
-                mailbox_size: 1024,
-                deque_size: 10,
-                backfill_quota: Quota::per_second(NonZeroU32::new(10).unwrap()),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
-                activity_timeout: 10,
-                skip_timeout: 5,
-                max_fetch_count: 10,
-                _max_fetch_size: 1024 * 512,
-                fetch_concurrent: 10,
-                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
-            };
+                polynomial.clone(),
+                shares[idx].clone(),
+                validators.clone(),
+            );
+
             let engine = Engine::new(
                 context.with_label(&uid),
                 config,
@@ -238,6 +231,7 @@ pub fn run_until_height(
         }
 
         if verify_consensus {
+            // Check that all nodes have the same canonical chain
             assert!(
                 engine_client_network
                     .verify_consensus(Some(stop_height))
@@ -258,12 +252,6 @@ pub fn run_until_height(
 /// # Returns
 /// * `Some(String)` if the tag is found and parsed successfully
 /// * `None` if the tag is not found or parsing fails
-///
-/// # Example
-/// ```
-/// let metric = "validator-node1_application_finalizer_<pubkey>abcdef123456</pubkey>_validator_balance";
-/// let pubkey = parse_metric_substring(metric, "pubkey");
-/// assert_eq!(pubkey, Some("abcdef123456".to_string()));
 /// ```
 pub fn parse_metric_substring(metric: &str, tag: &str) -> Option<String> {
     let start_tag = format!("<{}>", tag);
@@ -319,7 +307,7 @@ pub fn create_deposit_requests(n: usize) -> Vec<DepositRequest> {
             ed25519_pubkey: PublicKey::decode(&ed25519_seed[..]).expect("valid ed25519 key"),
             bls_pubkey,
             withdrawal_credentials,
-            amount: 32_000_000_000 + (i as u64 * 1_000_000_000), // 32+ ETH in gwei, slightly different for each
+            amount: 32_000_000_000,
             signature,
             index: i as u64 + 1,
         };
@@ -348,4 +336,53 @@ pub fn execution_requests_to_requests(execution_requests: Vec<ExecutionRequest>)
     }
 
     Requests::from(requests_bytes)
+}
+
+/// Create an EngineConfig with default values for testing
+///
+/// # Arguments
+/// * `engine_client` - Generic engine client implementing the EngineClient trait
+/// * `partition_prefix` - String identifier for partitioning (typically validator ID)
+/// * `genesis_hash` - 32-byte array representing the genesis block hash
+/// * `namespace` - String namespace identifier (typically "_SEISMIC_BFT")
+/// * `signer` - Private key for signing operations
+/// * `polynomial` - BLS12-381 polynomial for threshold cryptography
+/// * `share` - BLS12-381 cryptographic share for threshold operations
+/// * `participants` - Vector of participant public keys
+///
+/// # Returns
+/// * `EngineConfig<C>` - A fully configured engine config with sensible defaults for testing
+pub fn get_default_engine_config<C: EngineClient>(
+    engine_client: C,
+    partition_prefix: String,
+    genesis_hash: [u8; 32],
+    namespace: String,
+    signer: PrivateKey,
+    polynomial: Poly<Identity>,
+    share: Share,
+    participants: Vec<PublicKey>,
+) -> EngineConfig<C> {
+    EngineConfig {
+        engine_client,
+        partition_prefix,
+        genesis_hash,
+        namespace,
+        signer,
+        polynomial,
+        share,
+        participants,
+        mailbox_size: 1024,
+        deque_size: 10,
+        backfill_quota: Quota::per_second(NonZeroU32::new(10).unwrap()),
+        leader_timeout: Duration::from_secs(1),
+        notarization_timeout: Duration::from_secs(2),
+        nullify_retry: Duration::from_secs(10),
+        fetch_timeout: Duration::from_secs(1),
+        activity_timeout: 10,
+        skip_timeout: 5,
+        max_fetch_count: 10,
+        _max_fetch_size: 1024 * 512,
+        fetch_concurrent: 10,
+        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
+    }
 }
