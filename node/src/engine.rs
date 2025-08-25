@@ -42,9 +42,17 @@ const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 //
 
 // Onboarding config (set arbitrarily for now)
+
+#[cfg(debug_assertions)]
+const VALIDATOR_ONBOARDING_INTERVAL: u64 = 1;
+#[cfg(not(debug_assertions))]
 const VALIDATOR_ONBOARDING_INTERVAL: u64 = 10;
 const VALIDATOR_ONBOARDING_LIMIT_PER_BLOCK: usize = 3;
 const VALIDATOR_MINIMUM_STAKE: u64 = 32_000_000_000; // in gwei
+
+#[cfg(debug_assertions)]
+const VALIDATOR_WITHDRAWAL_PERIOD: u64 = 5;
+#[cfg(not(debug_assertions))]
 const VALIDATOR_WITHDRAWAL_PERIOD: u64 = 100;
 const VALIDATOR_MAX_WITHDRAWALS_PER_BLOCK: usize = 16;
 //

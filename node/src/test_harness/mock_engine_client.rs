@@ -17,6 +17,8 @@ use summit_types::Block;
 pub struct MockEngineClient {
     client_id: String,
     state: Arc<Mutex<MockEngineState>>,
+    // Execution requests that will be included in the blocks
+    execution_requests: Arc<Mutex<HashMap<u64, Requests>>>,
 }
 
 #[derive(Debug)]
@@ -42,12 +44,17 @@ struct MockEngineState {
 
 impl MockEngineClient {
     /// Create a new mock engine client
-    pub fn new(client_id: String, genesis_hash: [u8; 32]) -> Self {
+    pub fn new(
+        client_id: String,
+        genesis_hash: [u8; 32],
+        execution_requests: Arc<Mutex<HashMap<u64, Requests>>>,
+    ) -> Self {
         let state = MockEngineState::new(genesis_hash);
 
         Self {
             client_id,
             state: Arc::new(Mutex::new(state)),
+            execution_requests,
         }
     }
 
@@ -263,6 +270,8 @@ impl EngineClient for MockEngineClient {
         );
 
         // Wrap in envelope
+        let block_num = state.next_block_number;
+        let execution_requests = self.execution_requests.lock().unwrap().remove(&block_num);
         let envelope = ExecutionPayloadEnvelopeV4 {
             envelope_inner: ExecutionPayloadEnvelopeV3 {
                 execution_payload: new_block,
@@ -270,7 +279,7 @@ impl EngineClient for MockEngineClient {
                 blobs_bundle: BlobsBundleV1::default(),
                 should_override_builder: false,
             },
-            execution_requests: Requests::default(),
+            execution_requests: execution_requests.unwrap_or_default(),
         };
 
         // Store for later retrieval
@@ -378,24 +387,57 @@ impl EngineClient for MockEngineClient {
     }
 }
 
+pub struct MockEngineNetworkBuilder {
+    genesis_hash: [u8; 32],
+    execution_requests: Option<HashMap<u64, Requests>>,
+}
+
+impl MockEngineNetworkBuilder {
+    pub fn new(genesis_hash: [u8; 32]) -> Self {
+        Self {
+            genesis_hash,
+            execution_requests: None,
+        }
+    }
+
+    pub fn with_execution_requests(mut self, requests: HashMap<u64, Requests>) -> Self {
+        self.execution_requests = Some(requests);
+        self
+    }
+
+    pub fn build(self) -> MockEngineNetwork {
+        MockEngineNetwork {
+            genesis_hash: self.genesis_hash,
+            clients: Arc::new(Mutex::new(Vec::new())),
+            execution_requests: Arc::new(Mutex::new(self.execution_requests.unwrap_or_default())),
+        }
+    }
+}
+
 /// Network for managing multiple mock engine clients
 #[derive(Clone)]
 pub struct MockEngineNetwork {
-    clients: Arc<Mutex<Vec<MockEngineClient>>>,
     genesis_hash: [u8; 32],
+    clients: Arc<Mutex<Vec<MockEngineClient>>>,
+    execution_requests: Arc<Mutex<HashMap<u64, Requests>>>,
 }
 
 impl MockEngineNetwork {
     pub fn new(genesis_hash: [u8; 32]) -> Self {
         Self {
-            clients: Arc::new(Mutex::new(Vec::new())),
             genesis_hash,
+            clients: Arc::new(Mutex::new(Vec::new())),
+            execution_requests: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Create a new mock engine client
     pub fn create_client(&self, client_id: String) -> MockEngineClient {
-        let client = MockEngineClient::new(client_id, self.genesis_hash);
+        let client = MockEngineClient::new(
+            client_id,
+            self.genesis_hash,
+            self.execution_requests.clone(),
+        );
 
         let mut clients = self.clients.lock().unwrap();
         clients.push(client.clone());
@@ -496,7 +538,11 @@ mod tests {
     #[tokio::test]
     async fn test_basic_engine_client() {
         let genesis_hash = [0; 32];
-        let client = MockEngineClient::new("test".to_string(), genesis_hash);
+        let client = MockEngineClient::new(
+            "test".to_string(),
+            genesis_hash,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
 
         // Should start at genesis
         assert_eq!(client.get_chain_height(), 0);
