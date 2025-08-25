@@ -151,7 +151,9 @@ fn test_deposit_request() {
                 if metric.ends_with("validator_balance") {
                     let value = value.parse::<u64>().unwrap();
                     // Parse the pubkey from the metric name using helper function
-                    if let Some(pubkey_hex) = common::parse_metric_substring(metric, "pubkey") {
+                    if let Some(pubkey_hex) = common::parse_metric_substring(metric, "bls_key") {
+                        let ed_pubkey_hex = common::parse_metric_substring(metric, "ed_key").expect("ed key missing");
+                        assert_eq!(ed_pubkey_hex, test_deposit.ed25519_pubkey.to_string());
                         let bls_pubkey_hex = hex::encode(test_deposit.bls_pubkey);
                         assert_eq!(bls_pubkey_hex, pubkey_hex);
                         assert_eq!(value, test_deposit.amount);
