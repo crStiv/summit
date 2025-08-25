@@ -152,7 +152,11 @@ fn test_deposit_request() {
                     let value = value.parse::<u64>().unwrap();
                     // Parse the pubkey from the metric name using helper function
                     if let Some(pubkey_hex) = common::parse_metric_substring(metric, "bls_key") {
-                        let ed_pubkey_hex = common::parse_metric_substring(metric, "ed_key").expect("ed key missing");
+                        let ed_pubkey_hex = common::parse_metric_substring(metric, "ed_key")
+                            .expect("ed key missing");
+                        let creds =
+                            common::parse_metric_substring(metric, "creds").expect("creds missing");
+                        assert_eq!(creds, hex::encode(test_deposit.withdrawal_credentials));
                         assert_eq!(ed_pubkey_hex, test_deposit.ed25519_pubkey.to_string());
                         let bls_pubkey_hex = hex::encode(test_deposit.bls_pubkey);
                         assert_eq!(bls_pubkey_hex, pubkey_hex);

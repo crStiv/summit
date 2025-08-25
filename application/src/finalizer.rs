@@ -300,7 +300,12 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             {
                                                 let gauge: Gauge = Gauge::default();
                                                 gauge.set(validator_balance as i64);
-                                                ctx.register(format!("<ed_key>{}</ed_key><bls_key>{}</bls_key>_validator_balance", request.ed25519_pubkey, hex::encode(request.bls_pubkey)), "Validator balance", gauge);
+                                                ctx.register(
+                                                    format!("<creds>{}</creds><ed_key>{}</ed_key><bls_key>{}</bls_key>_validator_balance",
+                                                    hex::encode(request.withdrawal_credentials), request.ed25519_pubkey, hex::encode(request.bls_pubkey)),
+                                                    "Validator balance",
+                                                    gauge
+                                                );
                                             }
                                         }
                                         if validator_balance > self.validator_minimum_stake {
