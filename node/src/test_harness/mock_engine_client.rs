@@ -106,7 +106,7 @@ impl MockEngineClient {
                     })
                     .map(|envelope| envelope.envelope_inner.execution_payload.clone())
             };
-            
+
             if let Some(block) = block {
                 if !block.payload_inner.withdrawals.is_empty() {
                     withdrawals.insert(height, block.payload_inner.withdrawals);
@@ -810,11 +810,15 @@ mod tests {
             .start_building_block(genesis_state, 1000, vec![withdrawal.clone()])
             .await
             .unwrap();
-        
+
         // Get the payload and modify it to include the withdrawal
         let mut envelope = client1.get_payload(payload_id).await;
-        envelope.envelope_inner.execution_payload.payload_inner.withdrawals = vec![withdrawal.clone()];
-        
+        envelope
+            .envelope_inner
+            .execution_payload
+            .payload_inner
+            .withdrawals = vec![withdrawal.clone()];
+
         // Update the building payload with the withdrawal
         {
             let mut state = client1.state.lock().unwrap();
@@ -848,7 +852,7 @@ mod tests {
 
         // Test that network.get_withdrawals() returns the withdrawal
         let withdrawals = network.get_withdrawals();
-        
+
         assert_eq!(withdrawals.len(), 1);
         assert!(withdrawals.contains_key(&1));
         let block_1_withdrawals = withdrawals.get(&1).unwrap();
