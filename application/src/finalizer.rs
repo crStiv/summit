@@ -34,6 +34,7 @@ use tracing::{info, warn};
 
 const PAGE_SIZE: usize = 77;
 const PAGE_CACHE_SIZE: usize = 9;
+const REGISTRY_CHANGE_VIEW_DELTA: u64 = 3;
 
 pub struct Finalizer<
     R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng,
@@ -239,6 +240,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                                         withdrawal_request.amount = remaining_balance;
                                                         account.status = ValidatorStatus::SubmittedExitRequest;
                                                     }
+
                                                     account.pending_withdrawal_amount += withdrawal_request.amount;
                                                     self.state.set_account(&withdrawal_request.validator_pubkey, account).await;
                                                     self.state.push_withdrawal_request(withdrawal_request.clone(), new_height + self.validator_withdrawal_period).await;
@@ -258,6 +260,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                 for _ in 0..self.validator_onboarding_limit_per_block {
                                     if let Some(request) = self.state.pop_deposit().await {
                                         let mut validator_balance = 0;
+                                        let mut account_exists = false;
                                         if let Some(mut account) = self.state.get_account(&request.bls_pubkey).await {
                                             if request.index > account.last_deposit_index {
                                                 account.balance += request.amount;
@@ -270,6 +273,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                                 account.last_deposit_index = request.index;
                                                 validator_balance = account.balance;
                                                 self.state.set_account(&request.bls_pubkey, account).await;
+                                                account_exists = true;
                                             }
                                         } else {
                                             // Validate the withdrawal credentials format
@@ -307,16 +311,16 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                             let gauge: Gauge = Gauge::default();
                                             gauge.set(validator_balance as i64);
                                             ctx.register(
-                                                format!("<creds>{}</creds><ed_key>{}</ed_key><bls_key>{}</bls_key>_validator_balance",
+                                                format!("<creds>{}</creds><ed_key>{}</ed_key><bls_key>{}</bls_key>_deposit_validator_balance",
                                                 hex::encode(request.withdrawal_credentials), request.ed25519_pubkey, hex::encode(request.bls_pubkey)),
                                                 "Validator balance",
                                                 gauge
                                             );
                                         }
-                                        if validator_balance > self.validator_minimum_stake {
+                                        if !account_exists && validator_balance >= self.validator_minimum_stake {
                                             // If the node shuts down, before the account changes are committed,
                                             // then everything should work normally, because the registry is not persisted to disk
-                                            if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone(), last_indexed) {
+                                            if let Err(e) = self.registry.add_participant(request.ed25519_pubkey.clone(), block.view + REGISTRY_CHANGE_VIEW_DELTA) {
                                                 // This only happens if the key already exists
                                                 warn!("failed to add validator: {}", e);
                                             }
@@ -340,11 +344,23 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                         account.balance = account.balance.saturating_sub(withdrawal.amount);
                                         account.pending_withdrawal_amount = account.pending_withdrawal_amount.saturating_sub(withdrawal.amount);
 
+                                        #[cfg(debug_assertions)]
+                                        {
+                                            let gauge: Gauge = Gauge::default();
+                                            gauge.set(account.balance as i64);
+                                            ctx.register(
+                                                format!("<creds>{}</creds><ed_key>{}</ed_key><bls_key>{}</bls_key>_withdrawal_validator_balance",
+                                                hex::encode(account.withdrawal_credentials), account.ed25519_pubkey, hex::encode(pending_withdrawal.bls_pubkey)),
+                                                "Validator balance",
+                                                gauge
+                                            );
+                                        }
+
                                         // If the remaining balance is 0, mark the validator as inactive.
                                         // An argument can be made from removing the validator account from the DB here.
                                         if account.balance == 0 {
                                             account.status = ValidatorStatus::Inactive;
-                                            if let Err(e) = self.registry.remove_participant(&account.ed25519_pubkey, last_indexed) {
+                                            if let Err(e) = self.registry.remove_participant(&account.ed25519_pubkey, block.view + REGISTRY_CHANGE_VIEW_DELTA) {
                                                 warn!("failed to remove validator: {}", e);
                                             }
                                         }
@@ -361,6 +377,16 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                         }
 
                         // This will commit all changes to the state db
+                        #[cfg(debug_assertions)]
+                        {
+                            let gauge: Gauge = Gauge::default();
+                            gauge.set(new_height as i64);
+                            ctx.register(
+                                "height",
+                                "chain height",
+                                gauge
+                            );
+                        }
                         self.state.set_latest_height(new_height).await;
                         self.height_notifier.notify_up_to(new_height);
                         let _ = notifier.send(());

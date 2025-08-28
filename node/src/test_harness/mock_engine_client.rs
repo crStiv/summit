@@ -226,6 +226,7 @@ impl MockEngineState {
         parent_hash: FixedBytes<32>,
         timestamp: u64,
         client_id: &str,
+        withdrawals: Vec<Withdrawal>,
     ) -> ExecutionPayloadV3 {
         // Create deterministic but unique block hash
         use sha3::{Digest, Keccak256};
@@ -257,7 +258,7 @@ impl MockEngineState {
 
         let payload_v2 = ExecutionPayloadV2 {
             payload_inner: payload_v1,
-            withdrawals: vec![],
+            withdrawals,
         };
 
         ExecutionPayloadV3 {
@@ -273,7 +274,7 @@ impl EngineClient for MockEngineClient {
         &self,
         fork_choice_state: ForkchoiceState,
         timestamp: u64,
-        _withdrawals: Vec<Withdrawal>,
+        withdrawals: Vec<Withdrawal>,
     ) -> Option<PayloadId> {
         let mut state = self.state.lock().unwrap();
 
@@ -302,6 +303,7 @@ impl EngineClient for MockEngineClient {
             fork_choice_state.head_block_hash,
             timestamp,
             &self.client_id,
+            withdrawals,
         );
 
         // Wrap in envelope
@@ -688,6 +690,7 @@ mod tests {
             timestamp: 1000,
             block_value: alloy_primitives::U256::from(1_000_000_000_000_000_000u64),
             execution_requests: Vec::new(),
+            view: 1,
         };
 
         // Client2 checks the payload (validates it)
@@ -757,6 +760,7 @@ mod tests {
                         timestamp: (round * 1000) as u64,
                         block_value: U256::from(1_000_000_000_000_000_000u64),
                         execution_requests: Vec::new(),
+                        view: 1,
                     };
 
                     // Client validates the block
@@ -845,6 +849,7 @@ mod tests {
             timestamp: 1000,
             block_value: alloy_primitives::U256::from(1_000_000_000_000_000_000u64),
             execution_requests: Vec::new(),
+            view: 1,
         };
 
         client2.check_payload(&block_for_validation).await;
