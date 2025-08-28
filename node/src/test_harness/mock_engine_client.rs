@@ -226,7 +226,6 @@ impl MockEngineState {
         parent_hash: FixedBytes<32>,
         timestamp: u64,
         client_id: &str,
-        withdrawals: Vec<Withdrawal>,
     ) -> ExecutionPayloadV3 {
         // Create deterministic but unique block hash
         use sha3::{Digest, Keccak256};
@@ -258,7 +257,7 @@ impl MockEngineState {
 
         let payload_v2 = ExecutionPayloadV2 {
             payload_inner: payload_v1,
-            withdrawals,
+            withdrawals: vec![],
         };
 
         ExecutionPayloadV3 {
@@ -274,7 +273,7 @@ impl EngineClient for MockEngineClient {
         &self,
         fork_choice_state: ForkchoiceState,
         timestamp: u64,
-        withdrawals: Vec<Withdrawal>,
+        _withdrawals: Vec<Withdrawal>,
     ) -> Option<PayloadId> {
         let mut state = self.state.lock().unwrap();
 
@@ -303,7 +302,6 @@ impl EngineClient for MockEngineClient {
             fork_choice_state.head_block_hash,
             timestamp,
             &self.client_id,
-            withdrawals,
         );
 
         // Wrap in envelope
