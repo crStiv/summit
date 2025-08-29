@@ -19,7 +19,7 @@ use std::{
 use alloy_node_bindings::Reth;
 use clap::Parser;
 use commonware_runtime::{Metrics as _, Runner as _, Spawner as _, tokio};
-use summit::args::{Flags, run_node_with_runtime};
+use summit::args::{RunFlags, run_node_with_runtime};
 use tracing::Level;
 
 #[derive(Parser, Debug)]
@@ -74,7 +74,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .arg("testnet/jwt.hex")
                     .arg("--enclave.mock-server")
                     .arg("--enclave.endpoint-port")
-                    .arg(format!("1744{x}"));
+                    .arg(format!("1744{x}"))
+                    .arg("--auth-ipc")
+                    .arg("--auth-ipc.path")
+                    .arg(format!("/tmp/reth_engine_api{x}.ipc"));
 
                 let mut reth = reth_builder.spawn();
 
@@ -109,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 //     }
                 // });
 
-                let auth_port = reth.auth_port().unwrap();
+                let _auth_port = reth.auth_port().unwrap();
 
                 println!("Node {} rpc address: {}", x, reth.http_port());
 
@@ -119,11 +122,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if args.only_reth {
                     continue;
                 }
-
-                let mut flags = get_node_flags(x.into());
-                flags.engine_port = auth_port;
                 // Start our consensus engine
                 println!("******** STARTING CONSENSUS ENGINE FOR NODE {x}");
+                let flags = get_node_flags(x.into());
                 let handle = run_node_with_runtime(context.with_label(&format!("node{x}")), flags);
                 consensus_handles.push(handle);
             }
@@ -145,20 +146,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 
-fn get_node_flags(node: usize) -> Flags {
+fn get_node_flags(node: usize) -> RunFlags {
     let path = format!("testnet/node{node}/");
 
-    Flags {
+    RunFlags {
         key_path: format!("{path}key.pem"),
         share_path: format!("{path}share.pem"),
         store_path: format!("{path}db"),
-        engine_port: 8551,
-        engine_jwt_path: "testnet/jwt.hex".into(),
         port: (26600 + (node * 10)) as u16,
         prom_port: (28600 + (node * 10)) as u16,
+        rpc_port: (3030 + (node * 10)) as u16,
         worker_threads: 2,
         log_level: "debug".into(),
         db_prefix: format!("{node}-quarts"),
         genesis_path: "./example_genesis.toml".into(),
+        engine_ipc_path: format!("/tmp/reth_engine_api{node}.ipc"),
     }
 }

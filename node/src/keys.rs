@@ -1,31 +1,44 @@
-use crate::{args::Flags, utils::get_expanded_path};
+use crate::args::DEFAULT_KEY_PATH;
 use anyhow::{Context as _, Result};
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use commonware_codec::extensions::DecodeExt;
 use std::io::{self, Write};
 
 use commonware_cryptography::{PrivateKeyExt as _, Signer};
 use commonware_utils::from_hex_formatted;
-use summit_types::PrivateKey;
+use summit_types::{PrivateKey, utils::get_expanded_path};
 
 #[derive(Subcommand, PartialEq, Eq, Debug, Clone)]
 pub enum KeySubCmd {
     /// Print the node's public keys.
-    Show,
+    Show {
+        #[command(flatten)]
+        flags: KeyFlags,
+    },
     /// Generate new private keys.
     /// This command will fail if the keys already exist.
-    Generate,
+    Generate {
+        #[command(flatten)]
+        flags: KeyFlags,
+    },
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct KeyFlags {
+    /// Path to your private key or where you want it generated
+    #[arg(long, default_value_t = DEFAULT_KEY_PATH.into())]
+    pub key_path: String,
 }
 
 impl KeySubCmd {
-    pub fn exec(&self, flags: &Flags) {
+    pub fn exec(&self) {
         match self {
-            KeySubCmd::Show => self.show_key(flags),
-            KeySubCmd::Generate => self.generate_keys(flags),
+            KeySubCmd::Show { flags } => self.show_key(flags),
+            KeySubCmd::Generate { flags } => self.generate_keys(flags),
         }
     }
 
-    fn generate_keys(&self, flags: &Flags) {
+    fn generate_keys(&self, flags: &KeyFlags) {
         let path = get_expanded_path(&flags.key_path).expect("Invalid path");
 
         // Check if key file already exists
@@ -61,7 +74,7 @@ impl KeySubCmd {
         println!("Public Key: {pub_key}");
     }
 
-    fn show_key(&self, flags: &Flags) {
+    fn show_key(&self, flags: &KeyFlags) {
         let pk =
             read_ed_key_from_path(&flags.key_path).expect("Unable to read private key from disk");
 
