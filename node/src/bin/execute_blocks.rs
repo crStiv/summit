@@ -91,7 +91,6 @@ async fn main() -> Result<()> {
                 println!("Processing block {}: hash={:?}", block_number, block_hash);
 
                 // Convert block data to Summit Block for check_payload
-                //let genesis_hash = [0xf7, 0x12, 0xaa, 0x92, 0x41, 0xcc, 0x24, 0x36, 0x9b, 0x14, 0x3c, 0xf6, 0xdc, 0xe8, 0x5f, 0x09, 0x02, 0xa9, 0x73, 0x1e, 0x70, 0xd6, 0x68, 0x18, 0xa3, 0xa5, 0x84, 0x5b, 0x29, 0x6c, 0x73, 0xdd];
                 let parent_digest: Digest = if block_number == 0 {
                     genesis_hash.into()
                 } else {
@@ -148,3 +147,105 @@ fn execution_payload_envelope_to_block(
         view,
     )
 }
+
+
+/* Use this bash script to start Reth with the correct configuration
+
+#!/bin/bash
+
+# Base Mainnet Reth Startup Script
+# This script starts op-reth configured for Base mainnet with Engine API enabled
+# Usage: ./start-base-mainnet.sh [--debug] [--clear] [additional args...]
+
+set -e
+
+# Parse flags
+DEBUG_MODE=false
+CLEAR_DATA=false
+ARGS=()
+
+for arg in "$@"; do
+    case $arg in
+    --debug)
+        DEBUG_MODE=true
+        shift
+        ;;
+    --clear)
+        CLEAR_DATA=true
+        shift
+        ;;
+    *)
+        ARGS+=("$arg")
+        ;;
+    esac
+done
+
+# Configuration
+DATA_DIR="$HOME/.reth/base-mainnet"
+JWT_SECRET_PATH="$DATA_DIR/jwt.hex"
+IPC_PATH="/tmp/reth-engine.ipc"
+ENGINE_PORT=8551
+HTTP_PORT=8545
+WS_PORT=8546
+P2P_PORT=30303
+
+# Debug configuration
+if [ "$DEBUG_MODE" = true ]; then
+    LOG_LEVEL="debug"
+    LOG_TARGETS="reth::cli,op_reth::cli,reth_node_core,reth_engine_tree,reth_evm,reth_provider,reth_blockchain_tree"
+else
+    LOG_LEVEL="info"
+    LOG_TARGETS=""
+fi
+
+# Clear data directory if requested
+if [ "$CLEAR_DATA" = true ]; then
+    if [ -d "$DATA_DIR" ]; then
+        echo "Clearing data directory: $DATA_DIR"
+        rm -rf "$DATA_DIR"
+    fi
+fi
+
+# Create data directory if it doesn't exist
+mkdir -p "$DATA_DIR"
+
+echo "Starting Base mainnet node..."
+echo "Data directory: $DATA_DIR"
+echo "Engine API: http://localhost:$ENGINE_PORT"
+echo "Engine IPC: $IPC_PATH"
+echo "HTTP RPC: http://localhost:$HTTP_PORT"
+echo "WebSocket RPC: ws://localhost:$WS_PORT"
+echo "Metrics: http://localhost:9001/metrics"
+echo "Log level: $LOG_LEVEL"
+
+# Build logging arguments
+LOG_ARGS=()
+if [ "$DEBUG_MODE" = true ]; then
+    LOG_ARGS+=(--log.stdout.filter "$LOG_TARGETS=$LOG_LEVEL")
+    LOG_ARGS+=(--log.file.filter "$LOG_TARGETS=$LOG_LEVEL")
+    LOG_ARGS+=(-vvvv) # Very verbose
+else
+    LOG_ARGS+=(--log.stdout.filter "$LOG_LEVEL")
+    LOG_ARGS+=(-vvv) # Info level
+fi
+
+# Start op-reth with Base mainnet configuration
+exec cargo run --bin op-reth --package op-reth --release -- node \
+    --chain base \
+    --datadir "$DATA_DIR" \
+    --port "$P2P_PORT" \
+    --http \
+    --http.port "$HTTP_PORT" \
+    --http.addr 0.0.0.0 \
+    --http.corsdomain "*" \
+    --ws \
+    --ws.port "$WS_PORT" \
+    --ws.addr 0.0.0.0 \
+    --auth-ipc \
+    --auth-ipc.path "$IPC_PATH" \
+    --full \
+    --discovery.port "$P2P_PORT" \
+    --metrics 0.0.0.0:9001 \
+    "${LOG_ARGS[@]}" \
+    "${ARGS[@]}"
+ */
