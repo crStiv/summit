@@ -148,7 +148,6 @@ fn execution_payload_envelope_to_block(
     )
 }
 
-
 /* Use this bash script to start Reth with the correct configuration
 
 #!/bin/bash
