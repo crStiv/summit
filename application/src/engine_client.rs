@@ -170,7 +170,6 @@ pub mod benchmarking {
                 .block_index
                 .get_block_number(&fork_choice_state.head_block_hash)?;
             let next_block_num = block_num + 1;
-            println!("next_block_num={}", next_block_num);
             if self.block_index.get_block_file(next_block_num).is_some() {
                 let bytes: [u8; 8] = next_block_num.to_le_bytes();
                 Some(PayloadId::new(bytes))
