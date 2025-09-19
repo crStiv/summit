@@ -28,11 +28,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 use summit_types::account::{ValidatorAccount, ValidatorStatus};
+use summit_types::checkpoint::Checkpoint;
 use summit_types::consensus_state::ConsensusState;
 use summit_types::execution_request::ExecutionRequest;
-use summit_types::withdrawal::PendingWithdrawal;
-use summit_types::{Block, PublicKey};
+use summit_types::utils::{is_last_block_of_epoch, is_penultimate_block_of_epoch};
+use summit_types::{BlockAuxData, BlockEnvelope, FinalizedHeader, PublicKey};
 use tracing::{info, warn};
+
+type AuxDataRequest = (u64, oneshot::Sender<BlockAuxData>);
 
 const PAGE_SIZE: usize = 77;
 const PAGE_CACHE_SIZE: usize = 9;
@@ -48,7 +51,7 @@ pub struct Finalizer<
 
     height_notify_mailbox: mpsc::Receiver<(u64, oneshot::Sender<()>)>,
 
-    pending_withdrawal_mailbox: mpsc::Receiver<(u64, oneshot::Sender<Vec<PendingWithdrawal>>)>,
+    aux_data_mailbox: mpsc::Receiver<AuxDataRequest>,
 
     engine_client: C,
 
@@ -56,13 +59,11 @@ pub struct Finalizer<
 
     forkchoice: Arc<Mutex<ForkchoiceState>>,
 
-    rx_finalizer_mailbox: mpsc::Receiver<(Block, oneshot::Sender<()>)>,
+    rx_finalizer_mailbox: mpsc::Receiver<(BlockEnvelope, oneshot::Sender<()>)>,
 
     db: FinalizerState<R>,
 
     state: ConsensusState,
-
-    validator_onboarding_interval: u64,
 
     validator_onboarding_limit_per_block: usize,
 
@@ -72,7 +73,9 @@ pub struct Finalizer<
 
     validator_max_withdrawals_per_block: usize,
 
-    checkpoint_interval: u64,
+    epoch_num_blocks: u64,
+
+    genesis_hash: [u8; 32],
 }
 
 impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient>
@@ -85,17 +88,17 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         registry: Registry,
         forkchoice: Arc<Mutex<ForkchoiceState>>,
         db_prefix: String,
-        validator_onboarding_interval: u64,
         validator_onboarding_limit_per_block: usize,
         validator_minimum_stake: u64,
         validator_withdrawal_period: u64,
         validator_max_withdrawals_per_block: usize,
-        checkpoint_interval: u64,
+        epoch_num_blocks: u64,
+        genesis_hash: [u8; 32],
     ) -> (
         Self,
         FinalizerMailbox,
         mpsc::Sender<(u64, oneshot::Sender<()>)>,
-        mpsc::Sender<(u64, oneshot::Sender<Vec<PendingWithdrawal>>)>,
+        mpsc::Sender<AuxDataRequest>,
     ) {
         let state_cfg = StateConfig {
             log_journal_partition: format!("{db_prefix}-finalizer_state-log"),
@@ -111,7 +114,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         let db = FinalizerState::new(context.with_label("finalizer_state"), state_cfg).await;
 
         let (tx_height_notify, height_notify_mailbox) = mpsc::channel(1000);
-        let (tx_pending_withdrawal, pending_withdrawal_mailbox) = mpsc::channel(1000);
+        let (tx_aux_data, aux_data_mailbox) = mpsc::channel(1000);
 
         let (tx_finalizer, rx_finalizer_mailbox) = mpsc::channel(1); // todo(dalton) there should only ever be one message in this channel since we block but lets verify this
 
@@ -119,19 +122,19 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             context,
             height_notifier: HeightNotifier::new(),
             height_notify_mailbox,
-            pending_withdrawal_mailbox,
+            aux_data_mailbox,
             engine_client,
             registry,
             forkchoice,
             rx_finalizer_mailbox,
             db,
             state: ConsensusState::default(),
-            validator_onboarding_interval,
             validator_onboarding_limit_per_block,
             validator_minimum_stake,
             validator_withdrawal_period,
             validator_max_withdrawals_per_block,
-            checkpoint_interval,
+            epoch_num_blocks,
+            genesis_hash,
         };
 
         // Try to load the latest ConsensusState from database
@@ -143,7 +146,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             finalizer,
             FinalizerMailbox::new(tx_finalizer),
             tx_height_notify,
-            tx_pending_withdrawal,
+            tx_aux_data,
         )
     }
 
@@ -167,21 +170,52 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                         self.height_notifier.register(height, sender);
                     },
 
-                    mail = self.pending_withdrawal_mailbox.next() => {
-                        let (height, sender) = mail.expect("pending withdrawal mailbox dropped");
+                    mail = self.aux_data_mailbox.next() => {
+                        let (height, sender) = mail.expect("aux data mailbox dropped");
 
                         // TODO(matthias): the height notify should take care of the synchronization, but verify this
                         // Get ready withdrawals at the current height
-                        let ready_withdrawals = self.state
-                            .get_next_ready_withdrawals(height, self.validator_max_withdrawals_per_block);
-                        let _ = sender.send(ready_withdrawals);
+
+                        // Create checkpoint if we're at an epoch boundary.
+                        // The consensus state is saved every `epoch_num_blocks` blocks.
+                        // The proposed block will contain the checkpoint that was saved at the previous height.
+                        let aux_data = if is_last_block_of_epoch(height, self.epoch_num_blocks) {
+                            // TODO(matthias): revisit this expect when the ckpt isn't in the DB
+                            let ckpt = self.db.get_pending_checkpoint().await.expect("the checkpoint is stored before this call");
+                            // TODO(matthias): should we verify the ckpt height against the `height` variable?
+
+                            // This is not the header from the last block, but the header from
+                            // the block that contains the last checkpoint
+                            let prev_header_hash = if let Some(finalized_header) = self.db.get_most_recent_finalized_header().await {
+                                finalized_header.header.digest
+                            } else {
+                                self.genesis_hash.into()
+                            };
+
+                            // Only submit withdrawals at the end of an epoch
+                            let ready_withdrawals = self.state
+                                .get_next_ready_withdrawals(height, self.validator_max_withdrawals_per_block);
+                            BlockAuxData {
+                                withdrawals: ready_withdrawals,
+                                checkpoint_hash: Some(ckpt.digest),
+                                header_hash: prev_header_hash,
+                            }
+                        } else {
+                            BlockAuxData {
+                                withdrawals: vec![],
+                                checkpoint_hash: None,
+                                header_hash: [0; 32].into(),
+                            }
+                        };
+                        let _ = sender.send(aux_data);
                     },
 
                     msg = self.rx_finalizer_mailbox.next() => {
-                        let Some((block, notifier)) = msg else {
+                        let Some((envelope, notifier)) = msg else {
                             warn!("All senders to finalizer dropped");
                             break;
                         };
+                        let BlockEnvelope { block, finalized } = envelope;
 
                         // check the payload
                         let payload_status = self.engine_client.check_payload(&block).await;
@@ -189,11 +223,13 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
 
                         // Verify withdrawal requests that were included in the block
                         // Make sure that the included withdrawals match the expected withdrawals
-                        let pending_withdrawals = self.state
-                            .get_next_ready_withdrawals(new_height, self.validator_max_withdrawals_per_block);
-                        let expected_withdrawals: Vec<Withdrawal> =
-                            pending_withdrawals.into_iter().map(|w| w.inner).collect();
-
+                        let expected_withdrawals: Vec<Withdrawal> = if is_last_block_of_epoch(new_height, self.epoch_num_blocks) {
+                            let pending_withdrawals = self.state
+                                .get_next_ready_withdrawals(new_height, self.validator_max_withdrawals_per_block);
+                                pending_withdrawals.into_iter().map(|w| w.inner).collect()
+                        } else {
+                            vec![]
+                        };
                         if payload_status.is_valid() && block.payload.payload_inner.withdrawals == expected_withdrawals {
                             let eth_hash = block.eth_block_hash();
 
@@ -272,8 +308,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
 
                             // Add validators that deposited to the validator set
                             let mut add_validators = Vec::new();
-                            let last_indexed = self.state.get_latest_height();
-                            if last_indexed % self.validator_onboarding_interval == 0 {
+                            if is_last_block_of_epoch(new_height, self.epoch_num_blocks) {
                                 for _ in 0..self.validator_onboarding_limit_per_block {
                                     if let Some(request) = self.state.pop_deposit() {
                                         let mut validator_balance = 0;
@@ -372,14 +407,13 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                         );
                                     }
 
-                                    // If the remaining balance is 0, mark the validator as inactive.
-                                    // An argument can be made from removing the validator account from the DB here.
+                                    // If the remaining balance is 0, remove the validator account from the state.
                                     if account.balance == 0 {
-                                        account.status = ValidatorStatus::Inactive;
+                                        self.state.remove_account(&pending_withdrawal.pubkey);
                                         remove_validators.push(PublicKey::decode(&pending_withdrawal.pubkey[..]).unwrap()); // todo(dalton) remove unwrap
+                                    } else {
+                                        self.state.set_account(pending_withdrawal.pubkey, account);
                                     }
-
-                                    self.state.set_account(pending_withdrawal.pubkey, account);
                                 }
                             }
 
@@ -395,7 +429,6 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                             info!(new_height, "finalized block");
                         }
 
-                        // This will commit all changes to the state db
                         #[cfg(debug_assertions)]
                         {
                             let gauge: Gauge = Gauge::default();
@@ -409,9 +442,65 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                         self.state.set_latest_height(new_height);
 
                         // Periodically persist state to database as a blob
-                        if new_height % self.checkpoint_interval == 0 {
+                        // We build the checkpoint one height before the epoch end which
+                        // allows the validators to sign the checkpoint hash in the last block
+                        // of the epoch
+                        if is_penultimate_block_of_epoch(new_height, self.epoch_num_blocks) {
                             self.db.store_consensus_state(new_height, &self.state).await;
+
+                            let ckpt = Checkpoint::new(&self.state);
+                            // Store the checkpoint in the database
+                            self.db.store_pending_checkpoint(&ckpt).await;
+                            // This will commit all changes to the state db
+                            self.db.commit().await;
+
+                            #[cfg(debug_assertions)]
+                            {
+                                let gauge: Gauge = Gauge::default();
+                                gauge.set(new_height as i64);
+                                ctx.register(
+                                    "consensus_state_stored",
+                                    "chain height",
+                                    gauge
+                                );
+                            }
                         }
+
+                        // Store finalizes checkpoint to database
+                        if is_last_block_of_epoch(new_height, self.epoch_num_blocks) {
+                            if let Some(finalized) = finalized {
+                                // The finalized signatures should always be included on the last block
+                                // of the epoch. However, there is an edge case, where the block after
+                                // last block of the epoch arrived out of order.
+                                // This is not critical and will likely never happen on all validators
+                                // at the same time.
+                                // TODO(matthias): figure out a good solution for making checkpoints available
+                                debug_assert!(block.header.digest == finalized.proposal.payload);
+
+                                // Store the finalized block header in the database
+                                let finalized_header = FinalizedHeader { header: block.header, finalized };
+                                self.db.store_finalized_header(new_height, &finalized_header).await;
+
+                                #[cfg(debug_assertions)]
+                                {
+                                    let gauge: Gauge = Gauge::default();
+                                    gauge.set(new_height as i64);
+                                    ctx.register(
+                                        format!("<header>{}</header><prev_header>{}</prev_header>_finalized_header_stored",
+                                        hex::encode(finalized_header.header.digest), hex::encode(finalized_header.header.prev_epoch_header_hash)),
+                                        "chain height",
+                                        gauge
+                                    );
+                                }
+                            }
+
+                            let ckpt = self.db.get_pending_checkpoint().await.expect("this checkpoint was stored last height");
+                            self.db.store_finalized_checkpoint(&ckpt).await;
+                            self.db.remove_pending_checkpoint().await;
+                            // This will commit all changes to the state db
+                            self.db.commit().await;
+                        }
+
                         self.height_notifier.notify_up_to(new_height);
                         let _ = notifier.send(());
                     },
@@ -454,17 +543,17 @@ impl HeightNotifier {
 
 #[derive(Clone)]
 pub struct FinalizerMailbox {
-    sender: mpsc::Sender<(Block, oneshot::Sender<()>)>,
+    sender: mpsc::Sender<(BlockEnvelope, oneshot::Sender<()>)>,
 }
 
 impl FinalizerMailbox {
-    pub fn new(sender: mpsc::Sender<(Block, oneshot::Sender<()>)>) -> Self {
+    pub fn new(sender: mpsc::Sender<(BlockEnvelope, oneshot::Sender<()>)>) -> Self {
         Self { sender }
     }
 }
 
 impl Reporter for FinalizerMailbox {
-    type Activity = Block;
+    type Activity = BlockEnvelope;
 
     async fn report(&mut self, activity: Self::Activity) {
         let (tx, rx) = oneshot::channel();

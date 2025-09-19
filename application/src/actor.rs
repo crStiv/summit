@@ -26,8 +26,9 @@ use std::{
 use tracing::{error, info, warn};
 
 use summit_syncer::ingress::Mailbox as SyncerMailbox;
-use summit_types::withdrawal::PendingWithdrawal;
-use summit_types::{Block, Digest};
+use summit_types::{Block, BlockAuxData, Digest};
+
+type AuxDataRequest = (u64, oneshot::Sender<BlockAuxData>);
 
 // Define a future that checks if the oneshot channel is closed using a mutable reference
 struct ChannelClosedFuture<'a, T> {
@@ -62,7 +63,7 @@ pub struct Actor<
     built_block: Arc<Mutex<Option<Block>>>,
     finalizer: Option<Finalizer<R, C>>,
     tx_height_notify: mpsc::Sender<(u64, oneshot::Sender<()>)>,
-    tx_pending_withdrawal: mpsc::Sender<(u64, oneshot::Sender<Vec<PendingWithdrawal>>)>,
+    tx_aux_data: mpsc::Sender<AuxDataRequest>,
     genesis_hash: [u8; 32],
 }
 
@@ -79,21 +80,20 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             finalized_block_hash: genesis_hash.into(),
         }));
 
-        let (finalizer, finalizer_mailbox, tx_height_notify, tx_pending_withdrawal) =
-            Finalizer::new(
-                context.with_label("finalizer"),
-                cfg.engine_client.clone(),
-                cfg.registry,
-                forkchoice.clone(),
-                cfg.partition_prefix,
-                cfg.validator_onboarding_interval,
-                cfg.validator_onboarding_limit_per_block,
-                cfg.validator_minimum_stake,
-                cfg.validator_withdrawal_period,
-                cfg.validator_max_withdrawals_per_block,
-                cfg.checkpoint_interval,
-            )
-            .await;
+        let (finalizer, finalizer_mailbox, tx_height_notify, tx_aux_data) = Finalizer::new(
+            context.with_label("finalizer"),
+            cfg.engine_client.clone(),
+            cfg.registry,
+            forkchoice.clone(),
+            cfg.partition_prefix,
+            cfg.validator_onboarding_limit_per_block,
+            cfg.validator_minimum_stake,
+            cfg.validator_withdrawal_period,
+            cfg.validator_max_withdrawals_per_block,
+            cfg.epoch_num_blocks,
+            genesis_hash,
+        )
+        .await;
 
         (
             Self {
@@ -104,7 +104,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 built_block: Arc::new(Mutex::new(None)),
                 finalizer: Some(finalizer),
                 tx_height_notify,
-                tx_pending_withdrawal,
+                tx_aux_data,
                 genesis_hash,
             },
             Mailbox::new(tx),
@@ -248,14 +248,16 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         // await for notification
         rx.await.expect("Finalizer dropped");
 
-        // Request pending withdrawals
+        // Request aux data (withdrawals, checkpoint hash, header hash)
         let (tx, rx) = oneshot::channel();
-        self.tx_pending_withdrawal
+        self.tx_aux_data
             .try_send((parent.height() + 1, tx))
             .expect("finalizer dropped");
 
         // await response
-        let pending_withdrawals = rx.await.expect("finalizer dropped");
+        let aux_data = rx.await.expect("finalizer dropped");
+        let pending_withdrawals = aux_data.withdrawals;
+        let checkpoint_hash = aux_data.checkpoint_hash;
 
         let mut current = self.context.current().epoch_millis();
         if current <= parent.timestamp() {
@@ -286,6 +288,8 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             payload_envelope.execution_requests.to_vec(),
             payload_envelope.envelope_inner.block_value,
             view,
+            checkpoint_hash,
+            aux_data.header_hash,
         );
 
         Ok(block)

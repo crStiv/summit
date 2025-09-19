@@ -1,4 +1,4 @@
-use crate::engine::{Engine, VALIDATOR_MINIMUM_STAKE};
+use crate::engine::{EPOCH_NUM_BLOCKS, Engine, VALIDATOR_MINIMUM_STAKE};
 use crate::test_harness::common;
 use crate::test_harness::common::get_default_engine_config;
 use crate::test_harness::mock_engine_client::MockEngineNetworkBuilder;
@@ -120,8 +120,8 @@ fn test_deposit_request_single() {
             engine.start(pending, resolver, broadcast, backfill);
         }
         // Poll metrics
-        let mut num_nodes_processed_requests = 0;
-        let mut num_nodes_height_reached = 0;
+        let mut height_reached = HashSet::new();
+        let mut processed_requests = HashSet::new();
         loop {
             let metrics = context.encode();
 
@@ -147,7 +147,7 @@ fn test_deposit_request_single() {
                 if metric.ends_with("finalizer_height") {
                     let height = value.parse::<u64>().unwrap();
                     if height == stop_height {
-                        num_nodes_height_reached += 1;
+                        height_reached.insert(metric.to_string());
                     }
                 }
 
@@ -160,12 +160,12 @@ fn test_deposit_request_single() {
                         assert_eq!(creds, hex::encode(test_deposit.withdrawal_credentials));
                         assert_eq!(pubkey_hex, test_deposit.pubkey.to_string());
                         assert_eq!(value, test_deposit.amount);
-                        num_nodes_processed_requests += 1;
+                        processed_requests.insert(metric.to_string());
                     } else {
                         println!("{}: {} (failed to parse pubkey)", metric, value);
                     }
                 }
-                if num_nodes_processed_requests >= n && num_nodes_height_reached >= n {
+                if processed_requests.len() as u32 >= n && height_reached.len() as u32 == n {
                     success = true;
                     break;
                 }
@@ -300,8 +300,8 @@ fn test_deposit_request_top_up() {
         }
 
         // Poll metrics
-        let mut num_nodes_height_reached = 0;
-        let mut num_nodes_processed_requests = 0;
+        let mut height_reached = HashSet::new();
+        let mut processed_requests = HashSet::new();
         loop {
             let metrics = context.encode();
 
@@ -327,7 +327,7 @@ fn test_deposit_request_top_up() {
                 if metric.ends_with("finalizer_height") {
                     let height = value.parse::<u64>().unwrap();
                     if height == stop_height {
-                        num_nodes_height_reached += 1;
+                        height_reached.insert(metric.to_string());
                     }
                 }
 
@@ -344,12 +344,12 @@ fn test_deposit_request_top_up() {
                         assert_eq!(ed_pubkey_hex, test_deposit1.pubkey.to_string());
                         // The amount from both deposits should be added to the validator balance
                         assert_eq!(balance, test_deposit1.amount + test_deposit2.amount);
-                        num_nodes_processed_requests += 1;
+                        processed_requests.insert(metric.to_string());
                     } else {
                         println!("{}: {} (failed to parse pubkey)", metric, value);
                     }
                 }
-                if num_nodes_processed_requests >= n && num_nodes_height_reached >= n {
+                if processed_requests.len() as u32 >= n && height_reached.len() as u32 == n {
                     success = true;
                     break;
                 }
@@ -443,9 +443,13 @@ fn test_deposit_and_withdrawal_request_single() {
         let requests2 = common::execution_requests_to_requests(execution_requests2);
 
         // Create execution requests map (add deposit to block 5)
+        // The deposit request will processed after 10 blocks because `EPOCH_NUM_BLOCKS`
+        // is set to 10 in debug mode.
+        // The withdrawal request should be added after block 10, otherwise it will be ignored, because
+        // the account doesn't exist yet.
         let deposit_block_height = 5;
-        let withdrawal_block_height = 7;
-        let stop_height = deposit_block_height + 10;
+        let withdrawal_block_height = 11;
+        let stop_height = withdrawal_block_height + EPOCH_NUM_BLOCKS + 1;
         let mut execution_requests_map = HashMap::new();
         execution_requests_map.insert(deposit_block_height, requests1);
         execution_requests_map.insert(withdrawal_block_height, requests2);
@@ -491,8 +495,8 @@ fn test_deposit_and_withdrawal_request_single() {
         }
 
         // Poll metrics
-        let mut num_nodes_height_reached = 0;
-        let mut num_nodes_processed_requests = 0;
+        let mut height_reached = HashSet::new();
+        let mut processed_requests = HashSet::new();
         loop {
             let metrics = context.encode();
             // Iterate over all lines
@@ -517,7 +521,7 @@ fn test_deposit_and_withdrawal_request_single() {
                 if metric.ends_with("finalizer_height") {
                     let height = value.parse::<u64>().unwrap();
                     if height == stop_height {
-                        num_nodes_height_reached += 1;
+                        height_reached.insert(metric.to_string());
                     }
                 }
 
@@ -530,12 +534,12 @@ fn test_deposit_and_withdrawal_request_single() {
                         assert_eq!(creds, hex::encode(test_withdrawal.source_address));
                         assert_eq!(ed_pubkey_hex, test_deposit.pubkey.to_string());
                         assert_eq!(balance, test_deposit.amount - test_withdrawal.amount);
-                        num_nodes_processed_requests += 1;
+                        processed_requests.insert(metric.to_string());
                     } else {
                         println!("{}: {} (failed to parse pubkey)", metric, value);
                     }
                 }
-                if num_nodes_processed_requests >= n && num_nodes_height_reached >= n {
+                if processed_requests.len() as u32 >= n && height_reached.len() as u32 == n {
                     success = true;
                     break;
                 }
@@ -550,8 +554,12 @@ fn test_deposit_and_withdrawal_request_single() {
 
         let withdrawals = engine_client_network.get_withdrawals();
         assert_eq!(withdrawals.len(), 1);
+        let withdrawal_epoch =
+            (withdrawal_block_height + VALIDATOR_WITHDRAWAL_PERIOD + EPOCH_NUM_BLOCKS - 1)
+                / EPOCH_NUM_BLOCKS;
+        let withdrawal_height = withdrawal_epoch * EPOCH_NUM_BLOCKS;
         let withdrawals = withdrawals
-            .get(&(withdrawal_block_height + VALIDATOR_WITHDRAWAL_PERIOD))
+            .get(&(withdrawal_height))
             .expect("missing withdrawal");
         assert_eq!(withdrawals[0].amount, test_withdrawal.amount);
         assert_eq!(withdrawals[0].address, test_withdrawal.source_address);
@@ -643,9 +651,13 @@ fn test_partial_withdrawal_balance_below_minimum_stake() {
         let requests3 = common::execution_requests_to_requests(execution_requests3);
 
         // Create execution requests map (add deposit to block 5)
+        // The deposit request will processed after 10 blocks because `EPOCH_NUM_BLOCKS`
+        // is set to 10 in debug mode.
+        // The withdrawal request should be added after block 10, otherwise it will be ignored, because
+        // the account doesn't exist yet.
         let deposit_block_height = 5;
-        let withdrawal_block_height = 7;
-        let stop_height = deposit_block_height + 10;
+        let withdrawal_block_height = 11;
+        let stop_height = withdrawal_block_height + EPOCH_NUM_BLOCKS + 1;
         let mut execution_requests_map = HashMap::new();
         execution_requests_map.insert(deposit_block_height, requests1);
         execution_requests_map.insert(withdrawal_block_height, requests2);
@@ -692,8 +704,8 @@ fn test_partial_withdrawal_balance_below_minimum_stake() {
         }
 
         // Poll metrics
-        let mut num_nodes_height_reached = 0;
-        let mut num_nodes_processed_requests = 0;
+        let mut height_reached = HashSet::new();
+        let mut processed_requests = HashSet::new();
         loop {
             let metrics = context.encode();
 
@@ -719,7 +731,7 @@ fn test_partial_withdrawal_balance_below_minimum_stake() {
                 if metric.ends_with("finalizer_height") {
                     let height = value.parse::<u64>().unwrap();
                     if height == stop_height {
-                        num_nodes_height_reached += 1;
+                        height_reached.insert(metric.to_string());
                     }
                 }
 
@@ -732,12 +744,12 @@ fn test_partial_withdrawal_balance_below_minimum_stake() {
                         assert_eq!(creds, hex::encode(test_withdrawal1.source_address));
                         assert_eq!(ed_pubkey_hex, test_deposit.pubkey.to_string());
                         assert_eq!(balance, 0);
-                        num_nodes_processed_requests += 1;
+                        processed_requests.insert(metric.to_string());
                     } else {
                         println!("{}: {} (failed to parse pubkey)", metric, value);
                     }
                 }
-                if num_nodes_processed_requests >= n && num_nodes_height_reached >= n {
+                if processed_requests.len() as u32 >= n && height_reached.len() as u32 == n {
                     success = true;
                     break;
                 }
@@ -754,8 +766,12 @@ fn test_partial_withdrawal_balance_below_minimum_stake() {
         // Make sure that test_withdrawal2 was ignored, only test_withdraw1 should be submitted
         // to the execution layer.
         assert_eq!(withdrawals.len(), 1);
+        let withdrawal_epoch =
+            (withdrawal_block_height + VALIDATOR_WITHDRAWAL_PERIOD + EPOCH_NUM_BLOCKS - 1)
+                / EPOCH_NUM_BLOCKS;
+        let withdrawal_height = withdrawal_epoch * EPOCH_NUM_BLOCKS;
         let withdrawals = withdrawals
-            .get(&(withdrawal_block_height + VALIDATOR_WITHDRAWAL_PERIOD))
+            .get(&withdrawal_height)
             .expect("missing withdrawal");
         // Even though the first withdrawal was only 50% of the deposited amount,
         // since it put the validator under the minimum stake limit, the entire balance was withdrawn.
@@ -843,9 +859,13 @@ fn test_deposit_less_than_min_stake_and_withdrawal() {
         let requests2 = common::execution_requests_to_requests(execution_requests2);
 
         // Create execution requests map (add deposit to block 5)
+        // The deposit request will processed after 10 blocks because `EPOCH_NUM_BLOCKS`
+        // is set to 10 in debug mode.
+        // The withdrawal request should be added after block 10, otherwise it will be ignored, because
+        // the account doesn't exist yet.
         let deposit_block_height = 5;
-        let withdrawal_block_height = 7;
-        let stop_height = deposit_block_height + 10;
+        let withdrawal_block_height = 11;
+        let stop_height = withdrawal_block_height + EPOCH_NUM_BLOCKS + 1;
         let mut execution_requests_map = HashMap::new();
         execution_requests_map.insert(deposit_block_height, requests1);
         execution_requests_map.insert(withdrawal_block_height, requests2);
@@ -891,8 +911,8 @@ fn test_deposit_less_than_min_stake_and_withdrawal() {
         }
 
         // Poll metrics
-        let mut num_nodes_height_reached = 0;
-        let mut num_nodes_processed_requests = 0;
+        let mut height_reached = HashSet::new();
+        let mut processed_requests = HashSet::new();
         loop {
             let metrics = context.encode();
 
@@ -918,7 +938,7 @@ fn test_deposit_less_than_min_stake_and_withdrawal() {
                 if metric.ends_with("finalizer_height") {
                     let height = value.parse::<u64>().unwrap();
                     if height == stop_height {
-                        num_nodes_height_reached += 1;
+                        height_reached.insert(metric.to_string());
                     }
                 }
 
@@ -940,12 +960,12 @@ fn test_deposit_less_than_min_stake_and_withdrawal() {
                         assert_eq!(creds, hex::encode(test_withdrawal.source_address));
                         assert_eq!(ed_pubkey_hex, test_deposit.pubkey.to_string());
                         assert_eq!(balance, test_deposit.amount - test_withdrawal.amount);
-                        num_nodes_processed_requests += 1;
+                        processed_requests.insert(metric.to_string());
                     } else {
                         println!("{}: {} (failed to parse pubkey)", metric, value);
                     }
                 }
-                if num_nodes_processed_requests >= n && num_nodes_height_reached >= n {
+                if processed_requests.len() as u32 >= n && height_reached.len() as u32 == n {
                     success = true;
                     break;
                 }
@@ -960,8 +980,12 @@ fn test_deposit_less_than_min_stake_and_withdrawal() {
 
         let withdrawals = engine_client_network.get_withdrawals();
         assert_eq!(withdrawals.len(), 1);
+        let withdrawal_epoch =
+            (withdrawal_block_height + VALIDATOR_WITHDRAWAL_PERIOD + EPOCH_NUM_BLOCKS - 1)
+                / EPOCH_NUM_BLOCKS;
+        let withdrawal_height = withdrawal_epoch * EPOCH_NUM_BLOCKS;
         let withdrawals = withdrawals
-            .get(&(withdrawal_block_height + VALIDATOR_WITHDRAWAL_PERIOD))
+            .get(&withdrawal_height)
             .expect("missing withdrawal");
         assert_eq!(withdrawals[0].amount, test_withdrawal.amount);
         assert_eq!(withdrawals[0].address, test_withdrawal.source_address);
@@ -1063,8 +1087,8 @@ fn test_deposit_and_withdrawal_request_multiple() {
 
         // Create execution requests map (add deposit to block 5)
         let deposit_block_height = 5;
-        let withdrawal_block_height = 6;
-        let stop_height = deposit_block_height + 15;
+        let withdrawal_block_height = 11;
+        let stop_height = withdrawal_block_height + EPOCH_NUM_BLOCKS + 1;
         let mut execution_requests_map = HashMap::new();
         execution_requests_map.insert(deposit_block_height, requests1);
         execution_requests_map.insert(withdrawal_block_height, requests2);
@@ -1110,7 +1134,7 @@ fn test_deposit_and_withdrawal_request_multiple() {
         }
 
         // Poll metrics
-        let mut num_nodes_height_reached = 0;
+        let mut height_reached = HashSet::new();
         loop {
             let metrics = context.encode();
 
@@ -1136,7 +1160,7 @@ fn test_deposit_and_withdrawal_request_multiple() {
                 if metric.ends_with("finalizer_height") {
                     let height = value.parse::<u64>().unwrap();
                     if height == stop_height {
-                        num_nodes_height_reached += 1;
+                        height_reached.insert(metric.to_string());
                     }
                 }
 
@@ -1169,7 +1193,7 @@ fn test_deposit_and_withdrawal_request_multiple() {
                     assert_eq!(ed_pubkey_hex, deposit_req.pubkey.to_string());
                     assert_eq!(balance, deposit_req.amount - withdrawal_req.amount);
                 }
-                if num_nodes_height_reached >= n {
+                if height_reached.len() as u32 >= n {
                     success = true;
                     break;
                 }

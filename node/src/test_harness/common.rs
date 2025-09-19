@@ -178,7 +178,7 @@ pub fn run_until_height(
         }
 
         // Poll metrics
-        let mut num_nodes_finished = 0;
+        let mut nodes_finished = HashSet::new();
         loop {
             let metrics = context.encode();
 
@@ -204,9 +204,9 @@ pub fn run_until_height(
                 // If ends with contiguous_height, ensure it is at least required_container
                 if metric.ends_with("finalizer_height") {
                     let value = value.parse::<u64>().unwrap();
-                    if value >= stop_height {
-                        num_nodes_finished += 1;
-                        if num_nodes_finished == n {
+                    if value == stop_height {
+                        nodes_finished.insert(metric.to_string());
+                        if nodes_finished.len() as u32 == n {
                             success = true;
                             break;
                         }
@@ -258,6 +258,20 @@ pub fn parse_metric_substring(metric: &str, tag: &str) -> Option<String> {
 
     let substring_start = start + start_tag.len();
     Some(metric[substring_start..end].to_string())
+}
+
+/// Extracts the validator id from a metric string.
+///
+/// # Arguments
+/// * `metric` - The metric name to parse from
+///
+/// # Returns
+/// * `Some(String)` if the validator id is contained in the string
+/// * `None` if the validator if doesn't exist
+/// ```
+pub fn extract_validator_id(metric: &str) -> Option<String> {
+    let end = metric.find("_")?;
+    Some(metric[..end].to_string())
 }
 
 /// Create a single DepositRequest for testing
