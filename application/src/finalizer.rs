@@ -6,8 +6,9 @@ use alloy_primitives::Address;
 #[cfg(debug_assertions)]
 use alloy_primitives::hex;
 use alloy_rpc_types_engine::ForkchoiceState;
-use commonware_codec::DecodeExt as _;
+use commonware_codec::{DecodeExt as _, ReadExt};
 use commonware_consensus::Reporter;
+use commonware_cryptography::Verifier;
 use commonware_macros::select;
 use commonware_runtime::buffer::PoolRef;
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
@@ -33,7 +34,9 @@ use summit_types::checkpoint::Checkpoint;
 use summit_types::consensus_state::ConsensusState;
 use summit_types::execution_request::ExecutionRequest;
 use summit_types::utils::{is_last_block_of_epoch, is_penultimate_block_of_epoch};
-use summit_types::{Block, BlockAuxData, BlockEnvelope, FinalizedHeader, PublicKey};
+use summit_types::{
+    Block, BlockAuxData, BlockEnvelope, Digest, FinalizedHeader, PublicKey, Signature,
+};
 use tracing::{info, warn};
 
 type AuxDataRequest = (u64, oneshot::Sender<BlockAuxData>);
@@ -78,6 +81,8 @@ pub struct Finalizer<
 
     genesis_hash: [u8; 32],
 
+    protocol_version_digest: Digest,
+
     pending_checkpoint: Option<Checkpoint>,
 
     added_validators: Vec<PublicKey>,
@@ -101,6 +106,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         validator_max_withdrawals_per_block: usize,
         epoch_num_blocks: u64,
         genesis_hash: [u8; 32],
+        protocol_version: u32,
     ) -> (
         Self,
         FinalizerMailbox,
@@ -142,6 +148,9 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             validator_max_withdrawals_per_block,
             epoch_num_blocks,
             genesis_hash,
+            protocol_version_digest: commonware_cryptography::sha256::hash(
+                &protocol_version.to_le_bytes(),
+            ),
             pending_checkpoint: None,
             added_validators: Vec::new(),
             removed_validators: Vec::new(),
@@ -248,7 +257,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                     let block_delta = last_committed.elapsed().as_millis() as f64;
                     histogram!("block_time_millis").record(block_delta);
                 }
-                *last_committed_timestamp = Some(std::time::Instant::now());
+                *last_committed_timestamp = Some(Instant::now());
             }
 
             self.engine_client.commit_hash(forkchoice).await;
@@ -348,12 +357,41 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         }
     }
 
-    async fn parse_execution_requests(&mut self, _ctx: &R, block: &Block, new_height: u64) {
+    async fn parse_execution_requests(&mut self, ctx: &R, block: &Block, new_height: u64) {
         for request_bytes in &block.execution_requests {
             match ExecutionRequest::try_from_eth_bytes(request_bytes.as_ref()) {
                 Ok(execution_request) => {
                     match execution_request {
                         ExecutionRequest::Deposit(deposit_request) => {
+                            let message = deposit_request.as_message(self.protocol_version_digest);
+
+                            let mut signature_bytes = &deposit_request.signature[..];
+                            let Ok(signature) = Signature::read(&mut signature_bytes) else {
+                                info!(
+                                    "Failed to parse signature from deposit request: {deposit_request:?}"
+                                );
+                                continue; // Skip this deposit request
+                            };
+                            if !deposit_request.pubkey.verify(None, &message, &signature) {
+                                #[cfg(debug_assertions)]
+                                {
+                                    let gauge: Gauge = Gauge::default();
+                                    gauge.set(new_height as i64);
+                                    ctx.register(
+                                        format!(
+                                            "<pubkey>{}</pubkey>_deposit_request_invalid_sig",
+                                            hex::encode(&deposit_request.pubkey)
+                                        ),
+                                        "height",
+                                        gauge,
+                                    );
+                                }
+                                info!(
+                                    "Failed to verify signature from deposit request: {deposit_request:?}"
+                                );
+                                continue; // Skip this deposit request
+                            }
+
                             self.state.push_deposit(deposit_request);
                         }
                         ExecutionRequest::Withdrawal(mut withdrawal_request) => {

@@ -1,5 +1,6 @@
 use commonware_cryptography::{PrivateKeyExt, Signer};
 
+use crate::engine::PROTOCOL_VERSION;
 use crate::test_harness::mock_engine_client::MockEngineNetwork;
 use crate::{config::EngineConfig, engine::Engine};
 use alloy_eips::eip7685::Requests;
@@ -19,7 +20,7 @@ use std::{
 };
 use summit_application::engine_client::EngineClient;
 use summit_types::execution_request::{DepositRequest, ExecutionRequest, WithdrawalRequest};
-use summit_types::{PrivateKey, PublicKey};
+use summit_types::{Digest, PrivateKey, PublicKey};
 
 pub const GENESIS_HASH: &str = "0x683713729fcb72be6f3d8b88c8cda3e10569d73b9640d3bf6f5184d94bd97616";
 
@@ -221,6 +222,10 @@ pub fn run_until_height(
     })
 }
 
+pub fn get_domain() -> Digest {
+    commonware_cryptography::sha256::hash(&PROTOCOL_VERSION.to_le_bytes())
+}
+
 /// Parse a substring from a metric name using XML-like tags
 ///
 /// # Arguments
@@ -261,40 +266,67 @@ pub fn extract_validator_id(metric: &str) -> Option<String> {
     Some(metric[..end].to_string())
 }
 
-/// Create a single DepositRequest for testing
+/// Create a single DepositRequest for testing with a valid ED25519 signature
+///
+/// This function creates a test deposit request with all required fields, including
+/// a cryptographically valid signature that can be verified against the deposit message.
 ///
 /// # Arguments
-/// * `seed` - The seed value used to generate deterministic but unique keys
-/// * `amount` - The deposit amount in gwei
+/// * `index` - The deposit index value used for generating deterministic keys and in the signature
+/// * `amount` - The deposit amount in gwei  
+/// * `domain` - The domain value used in the signature (typically genesis hash)
+/// * `private_key` - Optional ED25519 private key to use; if None, generates deterministic key from index
+/// * `withdrawal_credentials` - Optional withdrawal credentials; if None, generates Eth1 format credentials
 ///
 /// # Returns
-/// * `DepositRequest` - A single deposit request with valid test data
-pub fn create_deposit_request(seed: u64, amount: u64) -> DepositRequest {
-    // Create valid Eth1 withdrawal credentials: 0x01 + 11 zero bytes + 20-byte address
-    let mut withdrawal_credentials = [0u8; 32];
-    withdrawal_credentials[0] = 0x01; // Eth1 withdrawal prefix
-    // Use seed-based address pattern for the last 20 bytes
-    for j in 0..20 {
-        withdrawal_credentials[12 + j] = ((seed + j as u64) % 256) as u8;
-    }
+/// * `(DepositRequest, PrivateKey)` - A tuple containing:
+///   - `DepositRequest` - A complete deposit request with valid signature
+///   - `PrivateKey` - The private key used to sign the request (for further testing)
+pub fn create_deposit_request(
+    index: u64,
+    amount: u64,
+    domain: Digest,
+    private_key: Option<PrivateKey>,
+    withdrawal_credentials: Option<[u8; 32]>,
+) -> (DepositRequest, PrivateKey) {
+    let withdrawal_credentials = if let Some(withdrawal_credentials) = withdrawal_credentials {
+        withdrawal_credentials
+    } else {
+        // Create valid Eth1 withdrawal credentials: 0x01 + 11 zero bytes + 20-byte address
+        let mut withdrawal_credentials = [0u8; 32];
+        withdrawal_credentials[0] = 0x01; // Eth1 withdrawal prefix
+        // Use seed-based address pattern for the last 20 bytes
+        for j in 0..20 {
+            withdrawal_credentials[12 + j] = ((index + j as u64) % 256) as u8;
+        }
+        withdrawal_credentials
+    };
 
-    // Create deterministic but seed-based keys
-    // Generate a valid ED25519 private key using the seed
-    let ed25519_private_key = PrivateKey::from_seed(seed);
+    let ed25519_private_key = if let Some(private_key) = private_key {
+        private_key
+    } else {
+        // Create deterministic but seed-based keys
+        // Generate a valid ED25519 private key using the seed
+        PrivateKey::from_seed(index)
+    };
+
     let pubkey = ed25519_private_key.public_key();
 
-    let mut signature = [0u8; 64];
-    for j in 0..64 {
-        signature[j] = ((seed + j as u64 + 81) % 256) as u8;
-    }
-
-    DepositRequest {
+    let mut deposit = DepositRequest {
         pubkey,
         withdrawal_credentials,
         amount,
-        signature,
-        index: seed,
-    }
+        signature: [0u8; 64],
+        index,
+    };
+
+    // Create the message to sign: hash of pubkey + withdrawal_credentials + amount
+    let message = deposit.as_message(domain);
+
+    //// Generate a valid ED25519 signature
+    let signature_bytes = ed25519_private_key.sign(None, &message);
+    deposit.signature.copy_from_slice(&signature_bytes);
+    (deposit, ed25519_private_key)
 }
 
 /// Create a single WithdrawalRequest for testing
