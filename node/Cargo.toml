@@ -19,7 +19,7 @@ required-features = ["bench"]
 
 [dependencies]
 summit-types.workspace = true
-summit-application.workspace = true
+summit-application = { workspace = true, features = [] }
 summit-rpc = { path = "../rpc" }
 summit-syncer.workspace = true
 
@@ -104,4 +104,5 @@ prom = [
   "procfs",
 ]
 jemalloc = ["dep:tikv-jemalloc-ctl"]
-bench = []
+base-bench = ["summit-application/base-bench", "summit-types/base-bench"]
+bench = ["summit-application/bench", "summit-types/bench"]

@@ -4,10 +4,16 @@ use clap::{Arg, Command};
 use commonware_utils::from_hex_formatted;
 use std::path::PathBuf;
 use summit_application::engine_client::EngineClient;
-use summit_application::engine_client::benchmarking::HistoricalEngineClient;
+#[cfg(feature = "base-bench")]
+use summit_application::engine_client::base_benchmarking::HistoricalEngineClient;
+#[cfg(feature = "bench")]
+use summit_application::engine_client::benchmarking::EthereumHistoricalEngineClient;
 use summit_types::{Block, Digest};
 
+#[cfg(all(feature = "base-bench", not(feature = "bench")))]
 const GENESIS_HASH: &str = "0xf712aa9241cc24369b143cf6dce85f0902a9731e70d66818a3a5845b296c73dd";
+#[cfg(feature = "bench")]
+const GENESIS_HASH: &str = "0x655cc1ecc77fe1eab4b1e62a1f461b7fddc9b06109b5ab3e9dc68c144b30c773";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,11 +44,18 @@ async fn main() -> Result<()> {
                 .required(true),
         )
         .arg(
+            Arg::new("start-block")
+                .long("start-block")
+                .value_name("COUNT")
+                .help("Block number of the first block")
+                .default_value("0"),
+        )
+        .arg(
             Arg::new("num-blocks")
                 .long("num-blocks")
                 .value_name("COUNT")
                 .help("Number of blocks to process")
-                .default_value("50000"),
+                .default_value("1000"),
         )
         .get_matches();
 
@@ -52,9 +65,15 @@ async fn main() -> Result<()> {
         .get_one::<String>("engine-ipc-path")
         .unwrap()
         .to_string();
+    let start_block: u64 = matches.get_one::<String>("start-block").unwrap().parse()?;
     let num_blocks: u64 = matches.get_one::<String>("num-blocks").unwrap().parse()?;
 
-    let client = HistoricalEngineClient::new(engine_ipc_path, block_dir).await;
+    #[allow(unused)]
+    #[cfg(feature = "base-bench")]
+    let client = HistoricalEngineClient::new(engine_ipc_path.clone(), block_dir.clone()).await;
+    #[allow(unused)]
+    #[cfg(feature = "bench")]
+    let client = EthereumHistoricalEngineClient::new(engine_ipc_path, block_dir).await;
 
     // Load and commit blocks to Reth
     let genesis_hash: [u8; 32] = from_hex_formatted(genesis_hash_str)
@@ -67,16 +86,20 @@ async fn main() -> Result<()> {
         safe_block_hash: genesis_hash.into(),
         finalized_block_hash: genesis_hash.into(),
     };
+    let mut block_number = start_block;
     for _ in 0..num_blocks {
-        match client.start_building_block(forkchoice, 0, vec![]).await {
+        println!("Block number: {}", block_number);
+        #[cfg(any(feature = "bench", feature = "base-bench"))]
+        let result = client
+            .start_building_block(forkchoice, 0, vec![], block_number)
+            .await;
+        #[cfg(not(any(feature = "bench", feature = "base-bench")))]
+        let result = client.start_building_block(forkchoice, 0, vec![]).await;
+        match result {
             Some(payload_id) => {
                 let payload = client.get_payload(payload_id).await;
+                block_number = u64::from_le_bytes(payload_id.0.into());
 
-                let block_number = payload
-                    .execution_payload
-                    .payload_inner
-                    .payload_inner
-                    .block_number;
                 let block_hash = payload
                     .execution_payload
                     .payload_inner
@@ -105,6 +128,7 @@ async fn main() -> Result<()> {
                 let payload_status = client.check_payload(&summit_block).await;
                 println!("  Payload status: {:?}", payload_status);
 
+                println!("forkchoice: {:?}", block_hash);
                 forkchoice = ForkchoiceState {
                     head_block_hash: block_hash,
                     safe_block_hash: block_hash,
