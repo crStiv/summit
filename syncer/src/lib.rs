@@ -5,7 +5,6 @@ use commonware_runtime::buffer::PoolRef;
 pub use ingress::*;
 use summit_types::PublicKey;
 pub mod coordinator;
-pub mod finalizer;
 pub mod handler;
 pub mod key;
 
@@ -25,8 +24,6 @@ pub struct Config {
     pub activity_timeout: u64,
 
     pub namespace: String,
-
-    pub epoch_num_blocks: u64,
 
     pub buffer_pool: PoolRef,
 }

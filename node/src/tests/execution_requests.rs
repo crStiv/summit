@@ -88,7 +88,8 @@ fn test_deposit_request_single() {
 
         // Create instances
         let mut public_keys = HashSet::new();
-        for signer in signers.into_iter() {
+        let mut consensus_state_queries = HashMap::new();
+        for (idx, signer) in signers.into_iter().enumerate() {
             // Create signer context
             let public_key = signer.public_key();
             public_keys.insert(public_key.clone());
@@ -106,8 +107,10 @@ fn test_deposit_request_single() {
                 namespace,
                 signer,
                 validators.clone(),
+                None,
             );
             let engine = Engine::new(context.with_label(&uid), config).await;
+            consensus_state_queries.insert(idx, engine.finalizer_mailbox.clone());
 
             // Get networking
             let (pending, resolver, broadcast, backfill) =
@@ -271,7 +274,8 @@ fn test_deposit_request_top_up() {
 
         // Create instances
         let mut public_keys = HashSet::new();
-        for signer in signers.into_iter() {
+        let mut consensus_state_queries = HashMap::new();
+        for (idx, signer) in signers.into_iter().enumerate() {
             // Create signer context
             let public_key = signer.public_key();
             public_keys.insert(public_key.clone());
@@ -289,8 +293,10 @@ fn test_deposit_request_top_up() {
                 namespace,
                 signer,
                 validators.clone(),
+                None,
             );
             let engine = Engine::new(context.with_label(&uid), config).await;
+            consensus_state_queries.insert(idx, engine.finalizer_mailbox.clone());
 
             // Get networking
             let (pending, resolver, broadcast, backfill) =
@@ -466,7 +472,8 @@ fn test_deposit_and_withdrawal_request_single() {
 
         // Create instances
         let mut public_keys = HashSet::new();
-        for signer in signers.into_iter() {
+        let mut consensus_state_queries = HashMap::new();
+        for (idx, signer) in signers.into_iter().enumerate() {
             // Create signer context
             let public_key = signer.public_key();
             public_keys.insert(public_key.clone());
@@ -484,8 +491,10 @@ fn test_deposit_and_withdrawal_request_single() {
                 namespace,
                 signer,
                 validators.clone(),
+                None,
             );
             let engine = Engine::new(context.with_label(&uid), config).await;
+            consensus_state_queries.insert(idx, engine.finalizer_mailbox.clone());
 
             // Get networking
             let (pending, resolver, broadcast, backfill) =
@@ -591,7 +600,7 @@ fn test_partial_withdrawal_balance_below_minimum_stake() {
         success_rate: 0.98,
     };
     // Create context
-    let cfg = deterministic::Config::default().with_seed(2);
+    let cfg = deterministic::Config::default().with_seed(3);
     let executor = Runner::from(cfg);
     executor.start(|context| async move {
         // Create simulated network
@@ -675,7 +684,8 @@ fn test_partial_withdrawal_balance_below_minimum_stake() {
 
         // Create instances
         let mut public_keys = HashSet::new();
-        for signer in signers.into_iter() {
+        let mut consensus_state_queries = HashMap::new();
+        for (idx, signer) in signers.into_iter().enumerate() {
             // Create signer context
             let public_key = signer.public_key();
             public_keys.insert(public_key.clone());
@@ -693,8 +703,10 @@ fn test_partial_withdrawal_balance_below_minimum_stake() {
                 namespace,
                 signer,
                 validators.clone(),
+                None,
             );
             let engine = Engine::new(context.with_label(&uid), config).await;
+            consensus_state_queries.insert(idx, engine.finalizer_mailbox.clone());
 
             // Get networking
             let (pending, resolver, broadcast, backfill) =
@@ -882,7 +894,8 @@ fn test_deposit_less_than_min_stake_and_withdrawal() {
 
         // Create instances
         let mut public_keys = HashSet::new();
-        for signer in signers.into_iter() {
+        let mut consensus_state_queries = HashMap::new();
+        for (idx, signer) in signers.into_iter().enumerate() {
             // Create signer context
             let public_key = signer.public_key();
             public_keys.insert(public_key.clone());
@@ -900,8 +913,10 @@ fn test_deposit_less_than_min_stake_and_withdrawal() {
                 namespace,
                 signer,
                 validators.clone(),
+                None,
             );
             let engine = Engine::new(context.with_label(&uid), config).await;
+            consensus_state_queries.insert(idx, engine.finalizer_mailbox.clone());
 
             // Get networking
             let (pending, resolver, broadcast, backfill) =
@@ -1104,7 +1119,8 @@ fn test_deposit_and_withdrawal_request_multiple() {
 
         // Create instances
         let mut public_keys = HashSet::new();
-        for signer in signers.into_iter() {
+        let mut consensus_state_queries = HashMap::new();
+        for (idx, signer) in signers.into_iter().enumerate() {
             // Create signer context
             let public_key = signer.public_key();
             public_keys.insert(public_key.clone());
@@ -1122,8 +1138,10 @@ fn test_deposit_and_withdrawal_request_multiple() {
                 namespace,
                 signer,
                 validators.clone(),
+                None,
             );
             let engine = Engine::new(context.with_label(&uid), config).await;
+            consensus_state_queries.insert(idx, engine.finalizer_mailbox.clone());
 
             // Get networking
             let (pending, resolver, broadcast, backfill) =
@@ -1313,7 +1331,8 @@ fn test_deposit_request_invalid_signature() {
 
         // Create instances
         let mut public_keys = HashSet::new();
-        for signer in signers.into_iter() {
+        let mut consensus_state_queries = HashMap::new();
+        for (idx, signer) in signers.into_iter().enumerate() {
             // Create signer context
             let public_key = signer.public_key();
             public_keys.insert(public_key.clone());
@@ -1331,8 +1350,10 @@ fn test_deposit_request_invalid_signature() {
                 namespace,
                 signer,
                 validators.clone(),
+                None,
             );
             let engine = Engine::new(context.with_label(&uid), config).await;
+            consensus_state_queries.insert(idx, engine.finalizer_mailbox.clone());
 
             // Get networking
             let (pending, resolver, broadcast, backfill) =

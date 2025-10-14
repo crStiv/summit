@@ -3,15 +3,14 @@ use std::{collections::BTreeSet, num::NonZero, time::Duration};
 use crate::{
     Orchestration, Orchestrator,
     coordinator::Coordinator,
-    finalizer::Finalizer,
     handler::Handler,
     ingress::{Mailbox, Message},
     key::{MultiIndex, Value},
 };
 use commonware_broadcast::{Broadcaster as _, buffered};
 use commonware_codec::{DecodeExt as _, Encode as _};
+use commonware_consensus::Viewable as _;
 use commonware_consensus::simplex::types::Finalization;
-use commonware_consensus::{Reporter, Viewable as _};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender, utils::requester};
 use commonware_resolver::{Resolver as _, p2p};
@@ -27,7 +26,7 @@ use commonware_utils::NZU64;
 use futures::{StreamExt as _, channel::mpsc};
 use governor::Quota;
 use rand::Rng;
-use summit_types::{Block, BlockEnvelope, Digest, Finalized, Notarized, PublicKey, Signature};
+use summit_types::{Block, Digest, Finalized, Notarized, PublicKey, Signature};
 use tracing::{debug, warn};
 
 const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
@@ -54,17 +53,17 @@ pub struct Actor<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock
     //
     // We store this separately because we may not have the finalization for a block
     blocks: ImmutableArchive<R, Digest, Block>,
+    orchestrator_mailbox: mpsc::Receiver<Orchestration>,
     public_key: PublicKey,
     participants: Vec<PublicKey>,
     mailbox_size: usize,
     backfill_quota: Quota,
     activity_timeout: u64,
     namespace: String,
-    epoch_num_blocks: u64,
 }
 
 impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Actor<R> {
-    pub async fn new(context: R, config: crate::Config) -> (Self, Mailbox) {
+    pub async fn new(context: R, config: crate::Config) -> (Self, Mailbox, Orchestrator) {
         let (tx, rx) = mpsc::channel(config.mailbox_size);
 
         // todo: mess with these defaults
@@ -144,6 +143,8 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Acto
         .await
         .expect("failed to init verified archive");
 
+        let (orchestrator_sender, orchestrator_mailbox) = mpsc::channel(2); // buffer to send processed while moving forward
+
         (
             Self {
                 context,
@@ -158,9 +159,10 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Acto
                 backfill_quota: config.backfill_quota,
                 activity_timeout: config.activity_timeout,
                 namespace: config.namespace,
-                epoch_num_blocks: config.epoch_num_blocks,
+                orchestrator_mailbox,
             },
             Mailbox::new(tx),
+            Orchestrator::new(orchestrator_sender),
         )
     }
 
@@ -171,9 +173,9 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Acto
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        app: impl Reporter<Activity = BlockEnvelope>,
+        tx_finalizer: mpsc::Sender<()>,
     ) -> Handle<()> {
-        self.context.spawn_ref()(self.run(buffer, backfill, app))
+        self.context.spawn_ref()(self.run(buffer, backfill, tx_finalizer))
     }
 
     pub async fn run(
@@ -183,27 +185,8 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Acto
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        app: impl Reporter<Activity = BlockEnvelope>,
+        mut tx_finalizer: mpsc::Sender<()>,
     ) {
-        let (orchestrator_sender, mut orchestrator_mailbox) = mpsc::channel(2); // buffer to send processed while moving forward
-        let orchestrator = Orchestrator::new(orchestrator_sender);
-        // start the syncer finalizer
-        let (mut tx_finalizer, rx_finalizer) = mpsc::channel(1);
-        // start the finalizer
-        let finalizer = Finalizer::new(
-            self.context.with_label("syncer-finalizer"),
-            "syncer-finalizer-metadata".into(),
-            app,
-            orchestrator,
-            rx_finalizer,
-            self.epoch_num_blocks,
-        )
-        .await;
-
-        self.context
-            .with_label("syncer-finalizer")
-            .spawn(|_| finalizer.run());
-
         let coordinator = Coordinator::new(self.participants.clone());
         let (handler_sender, mut handler_receiver) = mpsc::channel(self.mailbox_size);
         let handler = Handler::new(handler_sender);
@@ -405,7 +388,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Acto
                     }
                 }
                 },
-                orchestrator_message = orchestrator_mailbox.next() => {
+                orchestrator_message = self.orchestrator_mailbox.next() => {
                     let orchestrator_message = orchestrator_message.expect("Orchestrator closed");
                     match orchestrator_message {
                         Orchestration::Get { next, result } => {
@@ -433,16 +416,26 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Acto
                             requested_blocks.retain(|height| *height > next);
                         },
                         Orchestration::Repair { next, result } => {
+                            // While this should never happen, if the height is less than the sync
+                            // height, then we don't need to repair.
+                            // todo(dalton) make sure this is an okay check to remove now that we are not aware of sync_height in syncer
+                            // if next < sync_height {
+                            //     continue;
+                            // }
+
                             // Find next gap
                             let (_, start_next) = self.blocks.next_gap(next);
-                            let Some(start_next) = start_next else {
-                                result.send(false).expect("Failed to send repair result");
-                                continue;
+                            let start_next = if let Some(start_next) = start_next {
+                                start_next
+                            } else {
+                                // No gap found by next_gap, but block might still be missing (empty db case)
+                                next
                             };
 
-                            // If we are at some height greater than genesis, attempt to repair the parent
-                            if next > 0 {
-                                // Get gapped block
+                            // If we are at some height greater than genesis and start_next > next,
+                            // attempt to repair the parent of the gapped block
+                            if next > 0 && start_next > next {
+                                // Get gapped block (the first block after the gap)
                                 let gapped_block = self.blocks.get(Identifier::Index(start_next)).await.expect("Failed to get finalized block").expect("Gapped block missing");
 
                                 // Attempt to repair one block from other sources
@@ -469,8 +462,12 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng> Acto
                             }
 
                             // Enqueue next items (by index)
-                            let range = next..std::cmp::min(start_next, next + 20);
-                            debug!(range.start, range.end, "requesting missing finalized blocks");
+                            let range_end = if start_next == next {
+                                next + 1
+                            } else {
+                                std::cmp::min(start_next, next + 20)
+                            };
+                            let range = next..range_end;
                             for height in range {
                                 // Check if we've already requested
                                 if requested_blocks.contains(&height) {

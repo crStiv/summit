@@ -1,77 +1,59 @@
-use crate::Orchestrator;
-use commonware_consensus::Reporter;
+/*
+Requests the finalized blocks (in order) from the orchestrator, sends them to the finalizer to be executed,
+waits for confirmation that the finalizer has processed the block.
+
+Gets the highest height for which the application has processed from the finalizer. This allows resuming
+processing from the last processed height after a restart.
+*/
+
 use commonware_cryptography::Committable as _;
-use commonware_runtime::{Clock, Metrics, Spawner, Storage};
-use commonware_storage::metadata::{self, Metadata};
-use commonware_utils::sequence::FixedBytes;
-use futures::{StreamExt, channel::mpsc};
-use summit_types::BlockEnvelope;
-use summit_types::utils::is_last_block_of_epoch;
+use futures::{
+    SinkExt as _, StreamExt as _,
+    channel::{mpsc, oneshot},
+};
+use summit_syncer::Orchestrator;
+use summit_types::{BlockEnvelope, utils::is_last_block_of_epoch};
 use tracing::{debug, error};
-
-// The key used to store the last indexed height in the metadata store.
-const LATEST_KEY: FixedBytes<1> = FixedBytes::new([0u8]);
-
-/// Requests the finalized blocks (in order) from the orchestrator, sends them to the application,
-/// waits for confirmation that the application has processed the block.
-///
-/// Stores the highest height for which the application has processed. This allows resuming
-/// processing from the last processed height after a restart.
-pub struct Finalizer<R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = BlockEnvelope>>
-{
-    // Application that processes the finalized blocks.
-    application: Z,
-
+pub struct BlockFetcher {
     // Orchestrator that stores the finalized blocks.
     orchestrator: Orchestrator,
 
     // Notifier to indicate that the finalized blocks have been updated and should be re-queried.
     notifier_rx: mpsc::Receiver<()>,
 
-    // Metadata store that stores the last indexed height.
-    metadata: Metadata<R, FixedBytes<1>, u64>,
-
     // Number of blocks per epoch
     epoch_num_blocks: u64,
+
+    // The lowest height from which to begin syncing
+    sync_height: u64,
+
+    finalizer_mailbox: mpsc::Sender<(BlockEnvelope, oneshot::Sender<()>)>,
 }
 
-impl<R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = BlockEnvelope>>
-    Finalizer<R, Z>
-{
+impl BlockFetcher {
     /// Initialize the finalizer.
-    pub async fn new(
-        context: R,
-        partition_prefix: String,
-        application: Z,
+    pub fn new(
         orchestrator: Orchestrator,
         notifier_rx: mpsc::Receiver<()>,
         epoch_num_blocks: u64,
-    ) -> Self {
-        // Initialize metadata
-        let metadata = Metadata::init(
-            context.with_label("metadata"),
-            metadata::Config {
-                partition: format!("{partition_prefix}-metadata"),
-                codec_config: (),
+        sync_height: u64,
+    ) -> (Self, mpsc::Receiver<(BlockEnvelope, oneshot::Sender<()>)>) {
+        let (finalizer_mailbox, finalized_block_envelopes) = mpsc::channel(100); // todo(dalton) take channel size from a config
+        (
+            Self {
+                orchestrator,
+                notifier_rx,
+                epoch_num_blocks,
+                sync_height,
+                finalizer_mailbox,
             },
+            finalized_block_envelopes,
         )
-        .await
-        .expect("failed to initialize metadata");
-
-        Self {
-            application,
-            orchestrator,
-            notifier_rx,
-            metadata,
-            epoch_num_blocks,
-        }
     }
 
-    /// Run the finalizer, which continuously fetches and processes finalized blocks.
+    /// Run the block_fetcher, which continuously fetches and sends finalized blocks to finalizer.
     pub async fn run(mut self) {
-        // Initialize last indexed from metadata store.
-        // If the key does not exist, we assume the genesis block (height 0) has been indexed.
-        let mut latest = *self.metadata.get(&LATEST_KEY).unwrap_or(&0);
+        let mut latest = self.sync_height;
 
         // The main loop to process finalized blocks. This loop will hot-spin until a block is
         // available, at which point it will process it and continue. If a block is not available,
@@ -91,21 +73,21 @@ impl<R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = BlockEnvelop
                 // Sanity-check that the block height is the one we expect.
                 assert_eq!(block.height(), height, "block height mismatch");
 
-                // Send the block to the application.
+                // Send the block to the finalizer.
                 //
                 // After an unclean shutdown (where the finalizer metadata is not synced after some
                 // height is processed by the application), it is possible that the application may
                 // be asked to process a block it has already seen (which it can simply ignore).
                 let commitment = block.commitment();
                 let envelope = BlockEnvelope { block, finalized };
-                self.application.report(envelope).await;
-
+                let (tx, rx) = oneshot::channel();
+                self.finalizer_mailbox
+                    .send((envelope, tx))
+                    .await
+                    .expect("BlockFetcher->Finalizer channel closed");
+                rx.await.expect("Unable to get response from finalizer");
                 // Record that we have processed up through this height.
                 latest = height;
-                if let Err(e) = self.metadata.put_sync(LATEST_KEY.clone(), latest).await {
-                    error!("failed to update metadata: {e}");
-                    return;
-                }
 
                 // Notify the orchestrator that the block has been processed.
                 self.orchestrator.processed(height, commitment).await;

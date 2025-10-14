@@ -10,7 +10,8 @@ use clap::{Args, Parser, Subcommand};
 use commonware_cryptography::Signer;
 use commonware_p2p::authenticated;
 use commonware_runtime::{Handle, Metrics as _, Runner, Spawner as _, tokio};
-use summit_rpc::{PathSender, start_rpc_server};
+use summit_rpc::{PathSender, start_rpc_server, start_rpc_server_for_genesis};
+use tokio_util::sync::CancellationToken;
 
 use futures::{channel::oneshot, future::try_join_all};
 use governor::Quota;
@@ -19,13 +20,13 @@ use std::{
     num::NonZeroU32,
     str::FromStr as _,
 };
-use summit_application::engine_client::RethEngineClient;
 #[cfg(feature = "base-bench")]
-use summit_application::engine_client::base_benchmarking::HistoricalEngineClient;
-#[cfg(feature = "bench")]
-use summit_application::engine_client::benchmarking::EthereumHistoricalEngineClient;
+use summit_types::engine_client::base_benchmarking::HistoricalEngineClient;
 
-use summit_types::{Genesis, PublicKey, utils::get_expanded_path};
+#[cfg(feature = "bench")]
+use summit_types::engine_client::benchmarking::EthereumHistoricalEngineClient;
+
+use summit_types::{Genesis, PublicKey, RethEngineClient, utils::get_expanded_path};
 use tracing::{Level, error};
 
 pub const DEFAULT_KEY_PATH: &str = "~/.seismic/consensus/key.pem";
@@ -150,19 +151,28 @@ impl Command {
         executor.start(|context| async move {
             let (genesis_tx, genesis_rx) = oneshot::channel();
 
+            let cancel_token = CancellationToken::new();
+            let cloned_token = cancel_token.clone();
+
             // use the context async move to spawn a new runtime
-            let key_path = flags.key_path.clone();
             let genesis_path = flags.genesis_path.clone();
             let rpc_port = flags.rpc_port;
-            let rpc_handle = context.with_label("rpc").spawn(move |_context| async move {
-                let genesis_sender = Command::check_sender(genesis_path, genesis_tx);
-                if let Err(e) = start_rpc_server(key_path, genesis_sender, rpc_port).await {
-                    error!("RPC server failed: {}", e);
-                }
-            });
+            let _rpc_handle = context
+                .with_label("rpc_genesis")
+                .spawn(move |_context| async move {
+                    let genesis_sender = Command::check_sender(genesis_path, genesis_tx);
+                    if let Err(e) =
+                        start_rpc_server_for_genesis(genesis_sender, rpc_port, cloned_token).await
+                    {
+                        error!("RPC server failed: {}", e);
+                    }
+                });
 
             // Wait for genesis if needed
             let _ = genesis_rx.await;
+            // Shut down the genesis rpc server after receiving the genesis file
+            cancel_token.cancel();
+
             let genesis =
                 Genesis::load_from_file(&flags.genesis_path).expect("Can not find genesis file");
 
@@ -217,6 +227,7 @@ impl Command {
                 peers.clone(),
                 flags.db_prefix.clone(),
                 &genesis,
+                None,
             )
             .unwrap();
 
@@ -305,8 +316,19 @@ impl Command {
             // create engine
             let engine = Engine::new(context.with_label("engine"), config).await;
 
+            let finalizer_mailbox = engine.finalizer_mailbox.clone();
+
             // Start engine
             let engine = engine.start(pending, resolver, broadcaster, backfiller);
+
+            // Start RPC server
+            let key_path = flags.key_path.clone();
+            let rpc_port = flags.rpc_port;
+            let rpc_handle = context.with_label("rpc").spawn(move |_context| async move {
+                if let Err(e) = start_rpc_server(finalizer_mailbox, key_path, rpc_port).await {
+                    error!("RPC server failed: {}", e);
+                }
+            });
 
             // Wait for any task to error
             if let Err(e) = try_join_all(vec![p2p, engine, rpc_handle]).await {
@@ -316,28 +338,32 @@ impl Command {
     }
 }
 
-pub fn run_node_with_runtime(
-    context: commonware_runtime::tokio::Context,
-    flags: RunFlags,
-) -> Handle<()> {
+pub fn run_node_with_runtime(context: tokio::Context, flags: RunFlags) -> Handle<()> {
     context.spawn(async move |context| {
         let signer = expect_signer(&flags.key_path);
 
         let (genesis_tx, genesis_rx) = oneshot::channel();
 
+        let cancel_token = CancellationToken::new();
+        let cloned_token = cancel_token.clone();
         // use the context async move to spawn a new runtime
-        let key_path = flags.key_path.clone();
         let rpc_port = flags.rpc_port;
         let genesis_path = flags.genesis_path.clone();
-        let rpc_handle = context.with_label("rpc").spawn(move |_context| async move {
-            let genesis_sender = Command::check_sender(genesis_path, genesis_tx);
-            if let Err(e) = start_rpc_server(key_path, genesis_sender, rpc_port).await {
-                tracing::error!("RPC server failed: {}", e);
-            }
-        });
+        let _rpc_handle = context
+            .with_label("rpc_genesis")
+            .spawn(move |_context| async move {
+                let genesis_sender = Command::check_sender(genesis_path, genesis_tx);
+                if let Err(e) =
+                    start_rpc_server_for_genesis(genesis_sender, rpc_port, cloned_token).await
+                {
+                    error!("RPC server failed: {}", e);
+                }
+            });
 
         // Wait for genesis if needed
         let _ = genesis_rx.await;
+        // Shut down the genesis rpc server after receiving the genesis file
+        cancel_token.cancel();
 
         let genesis =
             Genesis::load_from_file(&flags.genesis_path).expect("Can not find genesis file");
@@ -356,13 +382,13 @@ pub fn run_node_with_runtime(
         let engine_client =
             RethEngineClient::new(engine_ipc_path.to_string_lossy().to_string()).await;
 
-        // let engine_client = RethEngineClient::new(engine_url.clone(), &engine_jwt);
         let config = EngineConfig::get_engine_config(
             engine_client,
             signer,
             peers.clone(),
             flags.db_prefix.clone(),
             &genesis,
+            None,
         )
         .unwrap();
 
@@ -415,8 +441,20 @@ pub fn run_node_with_runtime(
         // create engine
         let engine = Engine::new(context.with_label("engine"), config).await;
 
+        let finalizer_mailbox = engine.finalizer_mailbox.clone();
         // Start engine
         let engine = engine.start(pending, resolver, broadcaster, backfiller);
+
+        // Start RPC server
+        let key_path = flags.key_path.clone();
+        let rpc_port = flags.rpc_port;
+        let rpc_handle = context
+            .with_label("rpc_genesis")
+            .spawn(move |_context| async move {
+                if let Err(e) = start_rpc_server(finalizer_mailbox, key_path, rpc_port).await {
+                    error!("RPC server failed: {}", e);
+                }
+            });
 
         // Wait for any task to error
         if let Err(e) = try_join_all(vec![p2p, engine, rpc_handle]).await {

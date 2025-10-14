@@ -1,46 +1,38 @@
-use crate::Registry;
-use crate::db::{Config as StateConfig, FinalizerState};
-use crate::engine_client::EngineClient;
 use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::Address;
 #[cfg(debug_assertions)]
 use alloy_primitives::hex;
 use alloy_rpc_types_engine::ForkchoiceState;
-use commonware_codec::{DecodeExt as _, ReadExt};
-use commonware_consensus::Reporter;
-use commonware_cryptography::Verifier;
-use commonware_macros::select;
-use commonware_runtime::buffer::PoolRef;
-use commonware_runtime::{Clock, Metrics, Spawner, Storage};
+use commonware_codec::{DecodeExt as _, ReadExt as _};
+use commonware_cryptography::Verifier as _;
+use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::translator::TwoCap;
-use commonware_utils::hex;
-use commonware_utils::{NZU64, NZUsize};
-use futures::{
-    SinkExt as _, StreamExt,
-    channel::{mpsc, oneshot},
-};
+use commonware_utils::{NZU64, NZUsize, hex};
+use futures::channel::{mpsc, oneshot};
+use futures::{StreamExt as _, select};
 #[cfg(feature = "prom")]
 use metrics::{counter, histogram};
 #[cfg(debug_assertions)]
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
+use std::collections::BTreeMap;
 use std::num::NonZero;
 use std::time::Instant;
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use summit_syncer::Orchestrator;
 use summit_types::account::{ValidatorAccount, ValidatorStatus};
 use summit_types::checkpoint::Checkpoint;
-use summit_types::consensus_state::ConsensusState;
+use summit_types::consensus_state_query::{ConsensusStateRequest, ConsensusStateResponse};
 use summit_types::execution_request::ExecutionRequest;
 use summit_types::utils::{is_last_block_of_epoch, is_penultimate_block_of_epoch};
-use summit_types::{
-    Block, BlockAuxData, BlockEnvelope, Digest, FinalizedHeader, PublicKey, Signature,
-};
+use summit_types::{Block, BlockAuxData, Digest, FinalizedHeader, PublicKey, Signature};
+use summit_types::{BlockEnvelope, EngineClient, consensus_state::ConsensusState};
 use tracing::{info, warn};
 
-type AuxDataRequest = (u64, oneshot::Sender<BlockAuxData>);
+use crate::db::{Config as StateConfig, FinalizerState};
+use crate::{
+    FinalizerConfig, FinalizerMailbox, FinalizerMessage, block_fetcher::BlockFetcher,
+    registry::Registry,
+};
 
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024);
 
@@ -48,162 +40,144 @@ pub struct Finalizer<
     R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng,
     C: EngineClient,
 > {
+    mailbox: mpsc::Receiver<FinalizerMessage>,
+    pending_height_notifys: BTreeMap<u64, Vec<oneshot::Sender<()>>>,
     context: R,
-
-    height_notifier: HeightNotifier,
-
-    height_notify_mailbox: mpsc::Receiver<(u64, oneshot::Sender<()>)>,
-
-    aux_data_mailbox: mpsc::Receiver<AuxDataRequest>,
-
     engine_client: C,
-
     registry: Registry,
-
-    forkchoice: Arc<Mutex<ForkchoiceState>>,
-
-    rx_finalizer_mailbox: mpsc::Receiver<(BlockEnvelope, oneshot::Sender<()>)>,
-
     db: FinalizerState<R>,
-
     state: ConsensusState,
-
-    validator_onboarding_limit_per_block: usize,
-
-    validator_minimum_stake: u64, // in gwei
-
-    validator_withdrawal_period: u64, // in blocks
-
-    validator_max_withdrawals_per_block: usize,
-
-    epoch_num_blocks: u64,
-
+    forkchoice: ForkchoiceState,
     genesis_hash: [u8; 32],
-
+    validator_max_withdrawals_per_block: usize,
+    epoch_num_of_blocks: u64,
     protocol_version_digest: Digest,
+    validator_minimum_stake: u64,     // in gwei
+    validator_withdrawal_period: u64, // in blocks
+    validator_onboarding_limit_per_block: usize,
 }
 
 impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: EngineClient>
     Finalizer<R, C>
 {
-    #[allow(clippy::too_many_arguments)]
-    pub async fn new(
-        context: R,
-        engine_client: C,
-        registry: Registry,
-        forkchoice: Arc<Mutex<ForkchoiceState>>,
-        db_prefix: String,
-        validator_onboarding_limit_per_block: usize,
-        validator_minimum_stake: u64,
-        validator_withdrawal_period: u64,
-        validator_max_withdrawals_per_block: usize,
-        epoch_num_blocks: u64,
-        genesis_hash: [u8; 32],
-        protocol_version: u32,
-        buffer_pool: PoolRef,
-    ) -> (
-        Self,
-        FinalizerMailbox,
-        mpsc::Sender<(u64, oneshot::Sender<()>)>,
-        mpsc::Sender<AuxDataRequest>,
-    ) {
+    pub async fn new(context: R, cfg: FinalizerConfig<C>) -> (Self, FinalizerMailbox) {
+        let (tx, rx) = mpsc::channel(cfg.mailbox_size); // todo(dalton) pull mailbox size from config
         let state_cfg = StateConfig {
-            log_journal_partition: format!("{db_prefix}-finalizer_state-log"),
+            log_journal_partition: format!("{}-finalizer_state-log", cfg.db_prefix),
             log_write_buffer: WRITE_BUFFER,
             log_compression: None,
             log_codec_config: (),
             log_items_per_section: NZU64!(262_144),
-            locations_journal_partition: format!("{db_prefix}-finalizer_state-locations"),
+            locations_journal_partition: format!("{}-finalizer_state-locations", cfg.db_prefix),
             locations_items_per_blob: NZU64!(262_144), // todo: No reference for this config option look into this
             translator: TwoCap,
-            buffer_pool,
+            buffer_pool: cfg.buffer_pool,
         };
+
         let db = FinalizerState::new(context.with_label("finalizer_state"), state_cfg).await;
 
-        let (tx_height_notify, height_notify_mailbox) = mpsc::channel(1000);
-        let (tx_aux_data, aux_data_mailbox) = mpsc::channel(1000);
-
-        let (tx_finalizer, rx_finalizer_mailbox) = mpsc::channel(1); // todo(dalton) there should only ever be one message in this channel since we block but lets verify this
-
-        let mut finalizer = Self {
-            context,
-            height_notifier: HeightNotifier::new(),
-            height_notify_mailbox,
-            aux_data_mailbox,
-            engine_client,
-            registry,
-            forkchoice,
-            rx_finalizer_mailbox,
-            db,
-            state: ConsensusState::default(),
-            validator_onboarding_limit_per_block,
-            validator_minimum_stake,
-            validator_withdrawal_period,
-            validator_max_withdrawals_per_block,
-            epoch_num_blocks,
-            genesis_hash,
-            protocol_version_digest: commonware_cryptography::sha256::hash(
-                &protocol_version.to_le_bytes(),
-            ),
+        let state = if let Some(state) = cfg.initial_state {
+            state
+        } else {
+            db.get_latest_consensus_state().await.unwrap_or_default()
         };
 
-        // Try to load the latest ConsensusState from database
-        if let Some(loaded_state) = finalizer.db.get_latest_consensus_state().await {
-            finalizer.state = loaded_state;
-        }
-
+        // todo(dalton) We need to pull the last header and get the most recent forkchoice hash. Saving for followup PR
+        // db.get_most_recent_finalized_header();
+        let forkchoice = ForkchoiceState {
+            head_block_hash: cfg.genesis_hash.into(),
+            safe_block_hash: cfg.genesis_hash.into(),
+            finalized_block_hash: cfg.genesis_hash.into(),
+        };
         (
-            finalizer,
-            FinalizerMailbox::new(tx_finalizer),
-            tx_height_notify,
-            tx_aux_data,
+            Self {
+                context,
+                mailbox: rx,
+                engine_client: cfg.engine_client,
+                pending_height_notifys: BTreeMap::new(),
+                registry: cfg.registry,
+                epoch_num_of_blocks: cfg.epoch_num_of_blocks,
+                db,
+                state,
+                validator_max_withdrawals_per_block: cfg.validator_max_withdrawals_per_block,
+                forkchoice,
+                genesis_hash: cfg.genesis_hash,
+                protocol_version_digest: commonware_cryptography::sha256::hash(
+                    &cfg.protocol_version.to_le_bytes(),
+                ),
+                validator_minimum_stake: cfg.validator_minimum_stake,
+                validator_withdrawal_period: cfg.validator_withdrawal_period,
+                validator_onboarding_limit_per_block: cfg.validator_onboarding_limit_per_block,
+            },
+            FinalizerMailbox::new(tx),
         )
     }
 
-    pub fn start(mut self) {
-        self.context.clone().spawn(move |
-            #[cfg_attr(not(debug_assertions), allow(unused_variables))] ctx
-            | async move {
-            let mut last_committed_timestamp: Option<Instant> = None;
-            loop {
-                select! {
-                    mail = self.height_notify_mailbox.next() => {
-                        let (height, sender) = mail.expect("height notify mailbox dropped");
+    pub fn start(
+        mut self,
+        orchestrator: Orchestrator,
+        sync_height: u64,
+        finalization_notify: mpsc::Receiver<()>,
+    ) -> Handle<()> {
+        self.context.spawn_ref()(self.run(orchestrator, sync_height, finalization_notify))
+    }
 
-                        let last_indexed = self.state.get_latest_height();
-                        if last_indexed >= height {
-                            let _ = sender.send(());
-                            continue;
-                        }
+    pub async fn run(
+        mut self,
+        orchestrator: Orchestrator,
+        sync_height: u64,
+        finalization_notify: mpsc::Receiver<()>,
+    ) {
+        let (block_fetcher, mut rx_finalize_blocks) = BlockFetcher::new(
+            orchestrator,
+            finalization_notify,
+            self.epoch_num_of_blocks,
+            sync_height,
+        );
+        self.context
+            .with_label("block-fetcher")
+            .spawn(|_| block_fetcher.run());
 
-                        self.height_notifier.register(height, sender);
-                    },
-
-                    mail = self.aux_data_mailbox.next() => {
-                        let (height, sender) = mail.expect("aux data mailbox dropped");
-                        self.handle_aux_data_mailbox(&ctx, height, sender).await;
-                    },
-
-                    msg = self.rx_finalizer_mailbox.next() => {
-                        let Some((envelope, notifier)) = msg else {
+        let mut last_committed_timestamp: Option<Instant> = None;
+        loop {
+            select! {
+                msg = rx_finalize_blocks.next() => {
+                    let Some((envelope, notifier)) = msg else {
                             warn!("All senders to finalizer dropped");
                             break;
                         };
+                    self.handle_execution_block(notifier,envelope, &mut last_committed_timestamp).await;
 
-                        self.handle_execution_block(&ctx, notifier, envelope, &mut last_committed_timestamp).await;
-                    },
+                }
+                mailbox_message = self.mailbox.next() => {
+                    let mail = mailbox_message.expect("Finalizer mailbox closed");
+                    match mail {
+                        FinalizerMessage::NotifyAtHeight { height, response } => {
+                            let last_indexed = self.state.get_latest_height();
+                            if last_indexed >= height {
+                                let _ = response.send(());
+                                continue;
+                            }
+
+                            self.pending_height_notifys.entry(height).or_default().push(response);
+                        },
+                        FinalizerMessage::GetAuxData { height, response } => {
+                            self.handle_aux_data_mailbox(height, response).await;
+                        },
+                        FinalizerMessage::QueryState { request, response } => {
+                            self.handle_consensus_state_query(request, response).await;
+                        },
+                    }
                 }
             }
-        });
+        }
     }
 
     async fn handle_execution_block(
         &mut self,
-        ctx: &R,
         notifier: oneshot::Sender<()>,
         envelope: BlockEnvelope,
-        #[cfg(feature = "prom")] last_committed_timestamp: &mut Option<Instant>,
-        #[cfg(not(feature = "prom"))] _last_committed_timestamp: &mut Option<Instant>,
+        #[allow(unused_variables)] last_committed_timestamp: &mut Option<Instant>,
     ) {
         let BlockEnvelope { block, finalized } = envelope;
         // check the payload
@@ -213,7 +187,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         // Verify withdrawal requests that were included in the block
         // Make sure that the included withdrawals match the expected withdrawals
         let expected_withdrawals: Vec<Withdrawal> =
-            if is_last_block_of_epoch(new_height, self.epoch_num_blocks) {
+            if is_last_block_of_epoch(new_height, self.epoch_num_of_blocks) {
                 let pending_withdrawals = self.state.get_next_ready_withdrawals(
                     new_height,
                     self.validator_max_withdrawals_per_block,
@@ -253,20 +227,19 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
 
             self.engine_client.commit_hash(forkchoice).await;
 
-            *self.forkchoice.lock().expect("poisoned") = forkchoice;
+            self.forkchoice = forkchoice;
 
             // Parse execution requests
-            self.parse_execution_requests(ctx, &block, new_height).await;
+            self.parse_execution_requests(&block, new_height).await;
 
             // Add validators that deposited to the validator set
-            self.process_execution_requests(ctx, &block, new_height)
-                .await;
+            self.process_execution_requests(&block, new_height).await;
 
             #[cfg(debug_assertions)]
             {
                 let gauge: Gauge = Gauge::default();
                 gauge.set(new_height as i64);
-                ctx.register("height", "chain height", gauge);
+                self.context.register("height", "chain height", gauge);
             }
             self.state.set_latest_height(new_height);
 
@@ -274,13 +247,13 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
             // We build the checkpoint one height before the epoch end which
             // allows the validators to sign the checkpoint hash in the last block
             // of the epoch
-            if is_penultimate_block_of_epoch(new_height, self.epoch_num_blocks) {
+            if is_penultimate_block_of_epoch(new_height, self.epoch_num_of_blocks) {
                 let checkpoint = Checkpoint::new(&self.state);
                 self.state.pending_checkpoint = Some(checkpoint);
             }
 
             // Store finalizes checkpoint to database
-            if is_last_block_of_epoch(new_height, self.epoch_num_blocks) {
+            if is_last_block_of_epoch(new_height, self.epoch_num_of_blocks) {
                 let view = block.view();
                 if let Some(finalized) = finalized {
                     // The finalized signatures should always be included on the last block
@@ -304,7 +277,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                     {
                         let gauge: Gauge = Gauge::default();
                         gauge.set(new_height as i64);
-                        ctx.register(
+                        self.context.register(
                             format!("<header>{}</header><prev_header>{}</prev_header>_finalized_header_stored",
                                     hex::encode(finalized_header.header.digest), hex::encode(finalized_header.header.prev_epoch_header_hash)),
                             "chain height",
@@ -340,18 +313,19 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 {
                     let gauge: Gauge = Gauge::default();
                     gauge.set(new_height as i64);
-                    ctx.register("consensus_state_stored", "chain height", gauge);
+                    self.context
+                        .register("consensus_state_stored", "chain height", gauge);
                 }
             }
 
-            self.height_notifier.notify_up_to(new_height);
+            self.height_notify_up_to(new_height);
             let _ = notifier.send(());
 
             info!(new_height, "finalized block");
         }
     }
 
-    async fn parse_execution_requests(&mut self, ctx: &R, block: &Block, new_height: u64) {
+    async fn parse_execution_requests(&mut self, block: &Block, new_height: u64) {
         for request_bytes in &block.execution_requests {
             match ExecutionRequest::try_from_eth_bytes(request_bytes.as_ref()) {
                 Ok(execution_request) => {
@@ -371,7 +345,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                                 {
                                     let gauge: Gauge = Gauge::default();
                                     gauge.set(new_height as i64);
-                                    ctx.register(
+                                    self.context.register(
                                         format!(
                                             "<pubkey>{}</pubkey>_deposit_request_invalid_sig",
                                             hex::encode(&deposit_request.pubkey)
@@ -450,8 +424,8 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         }
     }
 
-    async fn process_execution_requests(&mut self, ctx: &R, block: &Block, new_height: u64) {
-        if is_penultimate_block_of_epoch(new_height, self.epoch_num_blocks) {
+    async fn process_execution_requests(&mut self, block: &Block, new_height: u64) {
+        if is_penultimate_block_of_epoch(new_height, self.epoch_num_of_blocks) {
             for _ in 0..self.validator_onboarding_limit_per_block {
                 if let Some(request) = self.state.pop_deposit() {
                     let mut validator_balance = 0;
@@ -527,7 +501,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                     {
                         let gauge: Gauge = Gauge::default();
                         gauge.set(validator_balance as i64);
-                        ctx.register(
+                        self.context.register(
                             format!("<registry>{}</registry><creds>{}</creds><pubkey>{}</pubkey>_deposit_validator_balance",
                                     !account_exists && validator_balance >= self.validator_minimum_stake,
                                     hex::encode(request.withdrawal_credentials), hex::encode(request.pubkey)),
@@ -562,7 +536,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 {
                     let gauge: Gauge = Gauge::default();
                     gauge.set(account.balance as i64);
-                    ctx.register(
+                    self.context.register(
                         format!(
                             "<creds>{}</creds><pubkey>{}</pubkey>_withdrawal_validator_balance",
                             hex::encode(account.withdrawal_credentials),
@@ -586,9 +560,23 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         }
     }
 
+    fn height_notify_up_to(&mut self, current_height: u64) {
+        // Split off all entries <= current_height
+        let to_notify = self.pending_height_notifys.split_off(&(current_height + 1));
+        // The original map now contains only entries > current_height
+        // Swap them back
+        let remaining = std::mem::replace(&mut self.pending_height_notifys, to_notify);
+
+        // Notify all the split-off entries
+        for (_, senders) in remaining {
+            for sender in senders {
+                let _ = sender.send(()); // Ignore if receiver dropped
+            }
+        }
+    }
+
     async fn handle_aux_data_mailbox(
         &mut self,
-        _ctx: &R,
         height: u64,
         sender: oneshot::Sender<BlockAuxData>,
     ) {
@@ -598,7 +586,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
         // Create checkpoint if we're at an epoch boundary.
         // The consensus state is saved every `epoch_num_blocks` blocks.
         // The proposed block will contain the checkpoint that was saved at the previous height.
-        let aux_data = if is_last_block_of_epoch(height, self.epoch_num_blocks) {
+        let aux_data = if is_last_block_of_epoch(height, self.epoch_num_of_blocks) {
             // TODO(matthias): revisit this expect when the ckpt isn't in the DB
             let checkpoint_hash = if let Some(checkpoint) = &self.state.pending_checkpoint {
                 checkpoint.digest
@@ -626,6 +614,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 header_hash: prev_header_hash,
                 added_validators: self.state.added_validators.clone(),
                 removed_validators: self.state.removed_validators.clone(),
+                forkchoice: self.forkchoice,
             }
         } else {
             BlockAuxData {
@@ -634,62 +623,26 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 header_hash: [0; 32].into(),
                 added_validators: vec![],
                 removed_validators: vec![],
+                forkchoice: self.forkchoice,
             }
         };
         let _ = sender.send(aux_data);
     }
-}
 
-struct HeightNotifier {
-    pending: BTreeMap<u64, Vec<oneshot::Sender<()>>>,
-}
-
-impl HeightNotifier {
-    pub fn new() -> Self {
-        Self {
-            pending: BTreeMap::new(),
-        }
-    }
-
-    fn register(&mut self, height: u64, sender: oneshot::Sender<()>) {
-        self.pending.entry(height).or_default().push(sender);
-    }
-
-    fn notify_up_to(&mut self, current_height: u64) {
-        // Split off all entries <= current_height
-        let to_notify = self.pending.split_off(&(current_height + 1));
-        // The original map now contains only entries > current_height
-        // Swap them back
-        let remaining = std::mem::replace(&mut self.pending, to_notify);
-
-        // Notify all the split-off entries
-        for (_, senders) in remaining {
-            for sender in senders {
-                let _ = sender.send(()); // Ignore if receiver dropped
+    async fn handle_consensus_state_query(
+        &self,
+        consensus_state_request: ConsensusStateRequest,
+        sender: oneshot::Sender<ConsensusStateResponse>,
+    ) {
+        match consensus_state_request {
+            ConsensusStateRequest::GetCheckpoint => {
+                let checkpoint = self.db.get_finalized_checkpoint().await;
+                let _ = sender.send(ConsensusStateResponse::Checkpoint(checkpoint));
+            }
+            ConsensusStateRequest::GetLatestHeight => {
+                let height = self.state.get_latest_height();
+                let _ = sender.send(ConsensusStateResponse::LatestHeight(height));
             }
         }
-    }
-}
-
-#[derive(Clone)]
-pub struct FinalizerMailbox {
-    sender: mpsc::Sender<(BlockEnvelope, oneshot::Sender<()>)>,
-}
-
-impl FinalizerMailbox {
-    pub fn new(sender: mpsc::Sender<(BlockEnvelope, oneshot::Sender<()>)>) -> Self {
-        Self { sender }
-    }
-}
-
-impl Reporter for FinalizerMailbox {
-    type Activity = BlockEnvelope;
-
-    async fn report(&mut self, activity: Self::Activity) {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.sender.send((activity, tx)).await;
-
-        // wait until finalization finishes
-        let _ = rx.await;
     }
 }

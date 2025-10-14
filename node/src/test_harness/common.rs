@@ -18,9 +18,9 @@ use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU32,
 };
-use summit_application::engine_client::EngineClient;
+use summit_types::checkpoint::Checkpoint;
 use summit_types::execution_request::{DepositRequest, ExecutionRequest, WithdrawalRequest};
-use summit_types::{Digest, PrivateKey, PublicKey};
+use summit_types::{Digest, EngineClient, PrivateKey, PublicKey};
 
 pub const GENESIS_HASH: &str = "0x683713729fcb72be6f3d8b88c8cda3e10569d73b9640d3bf6f5184d94bd97616";
 
@@ -135,7 +135,8 @@ pub fn run_until_height(
 
         // Create instances
         let mut public_keys = HashSet::new();
-        for (_idx, signer) in signers.into_iter().enumerate() {
+        let mut consensus_state_queries = HashMap::new();
+        for (idx, signer) in signers.into_iter().enumerate() {
             // Create signer context
             let public_key = signer.public_key();
             public_keys.insert(public_key.clone());
@@ -153,9 +154,11 @@ pub fn run_until_height(
                 namespace,
                 signer,
                 validators.clone(),
+                None,
             );
 
             let engine = Engine::new(context.with_label(&uid), config).await;
+            consensus_state_queries.insert(idx, engine.finalizer_mailbox.clone());
 
             // Get networking
             let (pending, resolver, broadcast, backfill) =
@@ -389,6 +392,7 @@ pub fn get_default_engine_config<C: EngineClient>(
     namespace: String,
     signer: PrivateKey,
     participants: Vec<PublicKey>,
+    checkpoint: Option<Checkpoint>,
 ) -> EngineConfig<C> {
     EngineConfig {
         engine_client,
@@ -410,5 +414,6 @@ pub fn get_default_engine_config<C: EngineClient>(
         _max_fetch_size: 1024 * 512,
         fetch_concurrent: 10,
         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
+        checkpoint,
     }
 }
