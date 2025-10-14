@@ -104,7 +104,7 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
     pub async fn store_consensus_state(&mut self, height: u64, state: &ConsensusState) {
         let key = Self::make_consensus_state_key(height);
         self.store
-            .update(key, Value::ConsensusState(state.clone()))
+            .update(key, Value::ConsensusState(Box::new(state.clone())))
             .await
             .expect("failed to store consensus state");
 
@@ -123,7 +123,7 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
             .await
             .expect("failed to get consensus state")
         {
-            Some(state)
+            Some(*state)
         } else {
             None
         }
@@ -220,7 +220,7 @@ impl<E: Clock + Storage + Metrics> FinalizerState<E> {
 #[derive(Clone)]
 enum Value {
     U64(u64),
-    ConsensusState(ConsensusState),
+    ConsensusState(Box<ConsensusState>),
     Checkpoint(Checkpoint),
     FinalizedHeader(Box<FinalizedHeader>),
 }
@@ -243,7 +243,10 @@ impl Read for Value {
         let value_type = buf.get_u8();
         match value_type {
             0x01 => Ok(Self::U64(buf.get_u64())),
-            0x05 => Ok(Self::ConsensusState(ConsensusState::read_cfg(buf, &())?)),
+            0x05 => Ok(Self::ConsensusState(Box::new(ConsensusState::read_cfg(
+                buf,
+                &(),
+            )?))),
             0x06 => Ok(Self::Checkpoint(Checkpoint::read_cfg(buf, &())?)),
             0x07 => Ok(Self::FinalizedHeader(Box::new(FinalizedHeader::read_cfg(
                 buf,
@@ -310,7 +313,7 @@ mod tests {
             let mut db = create_test_db_with_context("test_consensus_state", context).await;
 
             // Create a test consensus state
-            let mut consensus_state = ConsensusState::new();
+            let mut consensus_state = ConsensusState::default();
             consensus_state.set_latest_height(42);
 
             // Test that no state exists initially
@@ -334,7 +337,7 @@ mod tests {
             assert_eq!(latest.get_latest_height(), 42);
 
             // Store a newer state
-            let mut newer_state = ConsensusState::new();
+            let mut newer_state = ConsensusState::default();
             newer_state.set_latest_height(100);
             db.store_consensus_state(100, &newer_state).await;
             db.commit().await;
@@ -579,10 +582,10 @@ mod tests {
             let mut db = create_test_db_with_context("test_checkpoint", context).await;
 
             // Create test consensus states with different heights to ensure different digests
-            let mut finalized_state1 = ConsensusState::new();
+            let mut finalized_state1 = ConsensusState::default();
             finalized_state1.set_latest_height(100);
 
-            let mut finalized_state2 = ConsensusState::new();
+            let mut finalized_state2 = ConsensusState::default();
             finalized_state2.set_latest_height(200);
 
             // Create test checkpoints

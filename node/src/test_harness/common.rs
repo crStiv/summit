@@ -53,6 +53,30 @@ pub async fn link_validators(
     }
 }
 
+pub async fn join_validator(
+    oracle: &mut Oracle<PublicKey>,
+    validator: &PublicKey,
+    existing_validators: &[PublicKey],
+    link: Link,
+) {
+    for existing in existing_validators {
+        // Skip self
+        if existing == validator {
+            continue;
+        }
+
+        // Add links in both directions
+        oracle
+            .add_link(validator.clone(), existing.clone(), link.clone())
+            .await
+            .unwrap();
+        oracle
+            .add_link(existing.clone(), validator.clone(), link.clone())
+            .await
+            .unwrap();
+    }
+}
+
 pub async fn register_validators(
     oracle: &mut Oracle<PublicKey>,
     validators: &[PublicKey],
@@ -216,7 +240,7 @@ pub fn run_until_height(
             // Check that all nodes have the same canonical chain
             assert!(
                 engine_client_network
-                    .verify_consensus(Some(stop_height))
+                    .verify_consensus(None, Some(stop_height))
                     .is_ok()
             );
         }

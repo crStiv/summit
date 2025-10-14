@@ -26,7 +26,9 @@ use summit_types::engine_client::base_benchmarking::HistoricalEngineClient;
 #[cfg(feature = "bench")]
 use summit_types::engine_client::benchmarking::EthereumHistoricalEngineClient;
 
-use summit_types::{Genesis, PublicKey, RethEngineClient, utils::get_expanded_path};
+#[cfg(not(any(feature = "bench", feature = "base-bench")))]
+use summit_types::RethEngineClient;
+use summit_types::{Genesis, PublicKey, utils::get_expanded_path};
 use tracing::{Level, error};
 
 pub const DEFAULT_KEY_PATH: &str = "~/.seismic/consensus/key.pem";
@@ -137,6 +139,12 @@ impl Command {
     }
 
     pub fn run_node(&self, flags: &RunFlags) {
+        // Initialize tokio-console subscriber if feature is enabled
+        #[cfg(feature = "tokio-console")]
+        {
+            console_subscriber::init();
+        }
+
         let store_path = get_expanded_path(&flags.store_path).expect("Invalid store path");
         let signer = expect_signer(&flags.key_path);
 
@@ -379,6 +387,35 @@ pub fn run_node_with_runtime(context: tokio::Context, flags: RunFlags) -> Handle
 
         let engine_ipc_path =
             get_expanded_path(&flags.engine_ipc_path).expect("failed to expand engine ipc path");
+
+        #[allow(unused)]
+        #[cfg(feature = "base-bench")]
+        let engine_client = {
+            let block_dir = flags
+                .bench_block_dir
+                .as_ref()
+                .map(|p| get_expanded_path(p).expect("Invalid block directory path"))
+                .expect("bench_block_dir is required when using bench feature");
+            HistoricalEngineClient::new(engine_ipc_path.to_string_lossy().to_string(), block_dir)
+                .await
+        };
+
+        #[allow(unused)]
+        #[cfg(feature = "bench")]
+        let engine_client = {
+            let block_dir = flags
+                .bench_block_dir
+                .as_ref()
+                .map(|p| get_expanded_path(p).expect("Invalid block directory path"))
+                .expect("bench_block_dir is required when using bench feature");
+            EthereumHistoricalEngineClient::new(
+                engine_ipc_path.to_string_lossy().to_string(),
+                block_dir,
+            )
+            .await
+        };
+
+        #[cfg(not(any(feature = "bench", feature = "base-bench")))]
         let engine_client =
             RethEngineClient::new(engine_ipc_path.to_string_lossy().to_string()).await;
 
@@ -444,6 +481,22 @@ pub fn run_node_with_runtime(context: tokio::Context, flags: RunFlags) -> Handle
         let finalizer_mailbox = engine.finalizer_mailbox.clone();
         // Start engine
         let engine = engine.start(pending, resolver, broadcaster, backfiller);
+
+        // Start prometheus endpoint
+        #[cfg(feature = "prom")]
+        {
+            use crate::prom::hooks::Hooks;
+            use crate::prom::server::{MetricServer, MetricServerConfig};
+            use std::net::SocketAddr;
+
+            let hooks = Hooks::builder().build();
+
+            let listen_addr = format!("0.0.0.0:{}", flags.prom_port)
+                .parse::<SocketAddr>()
+                .unwrap();
+            let config = MetricServerConfig::new(listen_addr, hooks);
+            MetricServer::new(config).serve().await.unwrap();
+        }
 
         // Start RPC server
         let key_path = flags.key_path.clone();

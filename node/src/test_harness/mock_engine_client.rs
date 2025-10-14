@@ -115,6 +115,45 @@ impl MockEngineClient {
         withdrawals
     }
 
+    /// Load a checkpoint
+    pub fn load_checkpoint(&self, block_number: u64, hash: FixedBytes<32>) {
+        let mut state = self.state.lock().unwrap();
+
+        // Create a dummy block for the checkpoint
+        let dummy_block = ExecutionPayloadV3 {
+            payload_inner: alloy_rpc_types_engine::ExecutionPayloadV2 {
+                payload_inner: alloy_rpc_types_engine::ExecutionPayloadV1 {
+                    parent_hash: B256::ZERO,
+                    fee_recipient: alloy_primitives::Address::ZERO,
+                    state_root: B256::ZERO,
+                    receipts_root: B256::ZERO,
+                    logs_bloom: alloy_primitives::Bloom::ZERO,
+                    prev_randao: B256::ZERO,
+                    block_number,
+                    gas_limit: 30000000,
+                    gas_used: 0,
+                    timestamp: 0,
+                    extra_data: alloy_primitives::Bytes::new(),
+                    base_fee_per_gas: alloy_primitives::U256::from(1000000000u64),
+                    block_hash: hash,
+                    transactions: Vec::new().into(),
+                },
+                withdrawals: Vec::new().into(),
+            },
+            blob_gas_used: 0,
+            excess_blob_gas: 0,
+        };
+
+        state.canonical_blocks.insert(hash, dummy_block.clone());
+        state.canonical_by_number.insert(block_number, hash);
+        state.current_head = hash;
+        state.next_block_number = block_number + 1;
+
+        let status = PayloadStatus::new(PayloadStatusEnum::Valid, Some(hash));
+        state.known_blocks.insert(hash, status.clone());
+        state.validated_blocks.insert(hash, dummy_block);
+    }
+
     #[allow(unused)]
     /// Check if a block exists in canonical chain
     pub fn has_block(&self, block_hash: FixedBytes<32>) -> bool {
@@ -510,18 +549,23 @@ impl MockEngineNetwork {
     }
 
     /// Check if all clients have the same canonical chain (consensus)
-    pub fn verify_consensus(&self, until_block: Option<u64>) -> Result<(), String> {
+    pub fn verify_consensus(
+        &self,
+        from_block: Option<u64>,
+        until_block: Option<u64>,
+    ) -> Result<(), String> {
         let clients = self.get_clients();
 
         if clients.len() < 2 {
             return Ok(());
         }
 
+        let from_height = from_block.unwrap_or(0);
         let reference_height = until_block.unwrap_or(clients[0].get_chain_height());
         let reference_chain: Vec<(u64, _)> = clients[0]
             .get_canonical_chain()
             .into_iter()
-            .filter(|(height, _)| *height <= reference_height)
+            .filter(|(height, _)| *height >= from_height && *height <= reference_height)
             .collect();
 
         for client in clients.iter().skip(1) {
@@ -529,7 +573,7 @@ impl MockEngineNetwork {
             let client_chain: Vec<(u64, _)> = client
                 .get_canonical_chain()
                 .into_iter()
-                .filter(|(height, _)| *height <= client_height)
+                .filter(|(height, _)| *height >= from_height && *height <= client_height)
                 .collect();
 
             if client_height != reference_height {
@@ -558,7 +602,7 @@ impl MockEngineNetwork {
 
     /// Get consensus height (all clients must agree)
     pub fn get_consensus_height(&self) -> Result<u64, String> {
-        self.verify_consensus(None)?;
+        self.verify_consensus(None, None)?;
 
         let clients = self.get_clients();
         if clients.is_empty() {
@@ -636,7 +680,7 @@ mod tests {
         let client3 = network.create_client("client3".to_string());
 
         // All should start in consensus at height 0
-        assert!(network.verify_consensus(None).is_ok());
+        assert!(network.verify_consensus(None, None).is_ok());
         assert_eq!(network.get_consensus_height().unwrap(), 0);
 
         // All clients should have identical genesis chains
@@ -658,7 +702,7 @@ mod tests {
         let client2 = network.create_client("client2".to_string());
 
         // Start in consensus
-        assert!(network.verify_consensus(None).is_ok());
+        assert!(network.verify_consensus(None, None).is_ok());
 
         // Client1 builds and commits a block
         let genesis_state = ForkchoiceState {
@@ -691,7 +735,7 @@ mod tests {
         // Now clients are diverged
         assert_eq!(client1.get_chain_height(), 1);
         assert_eq!(client2.get_chain_height(), 0);
-        assert!(network.verify_consensus(None).is_err());
+        assert!(network.verify_consensus(None, None).is_err());
 
         // Simulate consensus: client2 receives the block through Engine API
         // First, client2 validates the block (like receiving it from network)
@@ -718,7 +762,7 @@ mod tests {
 
         // Now they should be in consensus again
         assert_eq!(client2.get_chain_height(), 1);
-        assert!(network.verify_consensus(None).is_ok());
+        assert!(network.verify_consensus(None, None).is_ok());
         assert_eq!(network.get_consensus_height().unwrap(), 1);
     }
 
@@ -798,7 +842,7 @@ mod tests {
             }
 
             // All should be in consensus at height `round`
-            assert!(network.verify_consensus(None).is_ok());
+            assert!(network.verify_consensus(None, None).is_ok());
             assert_eq!(network.get_consensus_height().unwrap(), round as u64);
 
             current_head = new_block.payload_inner.payload_inner.block_hash;
@@ -909,7 +953,7 @@ mod tests {
         let client3 = network.create_client("client3".to_string());
 
         // Start in consensus
-        assert!(network.verify_consensus(None).is_ok());
+        assert!(network.verify_consensus(None, None).is_ok());
 
         // Create conflicting blocks on different clients
         let genesis_state = ForkchoiceState {
@@ -969,7 +1013,7 @@ mod tests {
         client2.commit_hash(fork_choice_b).await;
 
         // Now consensus should fail - clients have different blocks at height 1
-        assert!(network.verify_consensus(None).is_err());
+        assert!(network.verify_consensus(None, None).is_err());
 
         // Heights are same but chains differ
         assert_eq!(client1.get_chain_height(), 1);
