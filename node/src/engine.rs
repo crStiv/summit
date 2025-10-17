@@ -13,9 +13,9 @@ use rand::{CryptoRng, Rng};
 use std::num::NonZero;
 use summit_application::ApplicationConfig;
 use summit_finalizer::actor::Finalizer;
-use summit_finalizer::registry::Registry;
 use summit_finalizer::{FinalizerConfig, FinalizerMailbox};
 use summit_syncer::Orchestrator;
+use summit_types::registry::Registry;
 use summit_types::{Block, Digest, EngineClient, PrivateKey, PublicKey};
 use tracing::{error, warn};
 
@@ -117,7 +117,7 @@ impl<E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics, C: Engin
         let syncer_config = summit_syncer::Config {
             partition_prefix: cfg.partition_prefix.clone(),
             public_key: cfg.signer.public_key(),
-            participants: cfg.participants,
+            registry: registry.clone(),
             mailbox_size: cfg.mailbox_size,
             backfill_quota: cfg.backfill_quota,
             activity_timeout: cfg.activity_timeout,
@@ -158,7 +158,6 @@ impl<E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics, C: Engin
                 reporter: syncer_mailbox.clone(),
                 supervisor: registry,
                 partition: format!("{}-summit", cfg.partition_prefix),
-                compression: None,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace.clone().as_bytes().to_vec(),
                 replay_buffer: REPLAY_BUFFER,

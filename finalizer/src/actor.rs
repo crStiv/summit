@@ -1,10 +1,12 @@
+use crate::db::{Config as StateConfig, FinalizerState};
+use crate::{FinalizerConfig, FinalizerMailbox, FinalizerMessage, block_fetcher::BlockFetcher};
 use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::Address;
 #[cfg(debug_assertions)]
 use alloy_primitives::hex;
 use alloy_rpc_types_engine::ForkchoiceState;
 use commonware_codec::{DecodeExt as _, ReadExt as _};
-use commonware_cryptography::Verifier as _;
+use commonware_cryptography::{Hasher, Sha256, Verifier as _};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZU64, NZUsize, hex};
@@ -23,16 +25,11 @@ use summit_types::account::{ValidatorAccount, ValidatorStatus};
 use summit_types::checkpoint::Checkpoint;
 use summit_types::consensus_state_query::{ConsensusStateRequest, ConsensusStateResponse};
 use summit_types::execution_request::ExecutionRequest;
+use summit_types::registry::Registry;
 use summit_types::utils::{is_last_block_of_epoch, is_penultimate_block_of_epoch};
 use summit_types::{Block, BlockAuxData, Digest, FinalizedHeader, PublicKey, Signature};
 use summit_types::{BlockEnvelope, EngineClient, consensus_state::ConsensusState};
 use tracing::{info, warn};
-
-use crate::db::{Config as StateConfig, FinalizerState};
-use crate::{
-    FinalizerConfig, FinalizerMailbox, FinalizerMessage, block_fetcher::BlockFetcher,
-    registry::Registry,
-};
 
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024);
 
@@ -100,9 +97,7 @@ impl<R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng, C: E
                 state,
                 validator_max_withdrawals_per_block: cfg.validator_max_withdrawals_per_block,
                 genesis_hash: cfg.genesis_hash,
-                protocol_version_digest: commonware_cryptography::sha256::hash(
-                    &cfg.protocol_version.to_le_bytes(),
-                ),
+                protocol_version_digest: Sha256::hash(&cfg.protocol_version.to_le_bytes()),
                 validator_minimum_stake: cfg.validator_minimum_stake,
                 validator_withdrawal_period: cfg.validator_withdrawal_period,
                 validator_onboarding_limit_per_block: cfg.validator_onboarding_limit_per_block,
