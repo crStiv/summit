@@ -8,6 +8,10 @@ name = "testnet"
 path = "src/bin/testnet.rs"
 
 [[bin]]
+name = "genesis"
+path = "src/bin/genesis.rs"
+
+[[bin]]
 name = "block-fetcher"
 path = "src/bin/block_fetcher.rs"
 required-features = ["bench"]
