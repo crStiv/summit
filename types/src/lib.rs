@@ -7,7 +7,10 @@ pub mod engine_client;
 pub mod execution_request;
 pub mod genesis;
 pub mod header;
+pub mod network_oracle;
 pub mod registry;
+#[cfg(feature = "e2e")]
+pub mod reth;
 pub mod utils;
 pub mod withdrawal;
 

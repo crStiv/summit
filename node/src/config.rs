@@ -4,26 +4,26 @@ use crate::keys::read_ed_key_from_path;
 use anyhow::{Context, Result};
 use commonware_utils::from_hex_formatted;
 use governor::Quota;
-use summit_types::checkpoint::Checkpoint;
+use summit_types::consensus_state::ConsensusState;
+use summit_types::network_oracle::NetworkOracle;
 use summit_types::{EngineClient, Genesis, PrivateKey, PublicKey};
-
 /* DEFAULTS */
 pub const PENDING_CHANNEL: u32 = 0;
 pub const RESOLVER_CHANNEL: u32 = 1;
 pub const BROADCASTER_CHANNEL: u32 = 2;
 pub const BACKFILLER_CHANNEL: u32 = 3;
+pub const MAILBOX_SIZE: usize = 16384;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const FETCH_CONCURRENT: usize = 4;
 const MAX_FETCH_COUNT: usize = 16;
 const MAX_FETCH_SIZE: usize = 512 * 1024;
-const MAILBOX_SIZE: usize = 16384;
 const DEQUE_SIZE: usize = 10;
 pub const MESSAGE_BACKLOG: usize = 16384;
 const BACKFILL_QUOTA: u32 = 10; // in seconds
 const FETCH_RATE_P2P: u32 = 128; // in seconds
 
-pub struct EngineConfig<C: EngineClient> {
+pub struct EngineConfig<C: EngineClient, O: NetworkOracle<PublicKey>> {
     pub engine_client: C,
     pub partition_prefix: String,
     pub signer: PrivateKey,
@@ -31,6 +31,8 @@ pub struct EngineConfig<C: EngineClient> {
     pub mailbox_size: usize,
     pub backfill_quota: Quota,
     pub deque_size: usize,
+
+    pub oracle: O,
 
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
@@ -46,23 +48,25 @@ pub struct EngineConfig<C: EngineClient> {
     pub namespace: String,
     pub genesis_hash: [u8; 32],
 
-    pub checkpoint: Option<Checkpoint>,
+    pub initial_state: ConsensusState,
 }
 
-impl<C: EngineClient> EngineConfig<C> {
+impl<C: EngineClient, O: NetworkOracle<PublicKey>> EngineConfig<C, O> {
     pub fn get_engine_config(
         engine_client: C,
+        oracle: O,
         signer: PrivateKey,
         participants: Vec<PublicKey>,
         db_prefix: String,
         genesis: &Genesis,
-        checkpoint: Option<Checkpoint>,
+        initial_state: ConsensusState,
     ) -> Result<Self> {
         Ok(Self {
             engine_client,
             partition_prefix: db_prefix,
             signer,
             participants,
+            oracle,
             mailbox_size: MAILBOX_SIZE,
             backfill_quota: Quota::per_second(NonZeroU32::new(BACKFILL_QUOTA).unwrap()),
             deque_size: DEQUE_SIZE,
@@ -81,7 +85,7 @@ impl<C: EngineClient> EngineConfig<C> {
                 .map(|hash_bytes| hash_bytes.try_into())
                 .expect("bad eth_genesis_hash")
                 .expect("bad eth_genesis_hash"),
-            checkpoint,
+            initial_state,
         })
     }
 }

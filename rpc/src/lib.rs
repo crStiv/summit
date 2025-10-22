@@ -1,8 +1,8 @@
 pub mod routes;
-use std::sync::Mutex;
-
 use crate::routes::RpcRoutes;
+use commonware_runtime::signal::Signal;
 use futures::channel::oneshot;
+use std::sync::Mutex;
 use summit_finalizer::FinalizerMailbox;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -25,6 +25,7 @@ pub async fn start_rpc_server(
     finalizer_mailbox: FinalizerMailbox,
     key_path: String,
     port: u16,
+    stop_signal: Signal,
 ) -> anyhow::Result<()> {
     let state = RpcState::new(key_path, finalizer_mailbox);
 
@@ -33,8 +34,12 @@ pub async fn start_rpc_server(
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
 
     println!("RPC Server listening on http://0.0.0.0:{port}");
-
-    axum::serve(listener, server).await?;
+    axum::serve(listener, server)
+        .with_graceful_shutdown(async move {
+            let sig = stop_signal.await.unwrap();
+            println!("RPC server stopped: {sig}");
+        })
+        .await?;
 
     Ok(())
 }

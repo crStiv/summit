@@ -1,6 +1,6 @@
-use crate::engine::{EPOCH_NUM_BLOCKS, Engine};
+use crate::engine::{EPOCH_NUM_BLOCKS, Engine, VALIDATOR_MINIMUM_STAKE};
 use crate::test_harness::common;
-use crate::test_harness::common::get_default_engine_config;
+use crate::test_harness::common::{DummyOracle, get_default_engine_config, get_initial_state};
 use crate::test_harness::mock_engine_client::MockEngineNetworkBuilder;
 use commonware_cryptography::{PrivateKeyExt, Signer};
 use commonware_macros::test_traced;
@@ -63,6 +63,13 @@ fn test_node_joins_later_no_checkpoint() {
             .expect("failed to convert genesis hash");
 
         let engine_client_network = MockEngineNetworkBuilder::new(genesis_hash).build();
+        let initial_state = get_initial_state(
+            genesis_hash,
+            &validators,
+            None,
+            None,
+            VALIDATOR_MINIMUM_STAKE,
+        );
 
         // Create instances
         let mut public_keys = HashSet::new();
@@ -84,12 +91,13 @@ fn test_node_joins_later_no_checkpoint() {
 
             let config = get_default_engine_config(
                 engine_client,
+                DummyOracle::default(),
                 uid.clone(),
                 genesis_hash,
                 namespace,
                 signer,
                 validators.clone(),
-                None,
+                initial_state.clone(),
             );
             let engine = Engine::new(context.with_label(&uid), config).await;
             consensus_state_queries.insert(idx, engine.finalizer_mailbox.clone());
@@ -134,12 +142,13 @@ fn test_node_joins_later_no_checkpoint() {
 
         let config = get_default_engine_config(
             engine_client,
+            DummyOracle::default(),
             uid.clone(),
             genesis_hash,
             namespace,
             signer_joining_later,
             validators.clone(),
-            None,
+            initial_state, // pass initial state (start from genesis)
         );
         let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -261,6 +270,13 @@ fn test_node_joins_later_no_checkpoint_not_in_genesis() {
             .expect("failed to convert genesis hash");
 
         let engine_client_network = MockEngineNetworkBuilder::new(genesis_hash).build();
+        let initial_state = get_initial_state(
+            genesis_hash,
+            &validators,
+            None,
+            None,
+            VALIDATOR_MINIMUM_STAKE,
+        );
 
         // Create instances
         let mut public_keys = HashSet::new();
@@ -282,12 +298,13 @@ fn test_node_joins_later_no_checkpoint_not_in_genesis() {
 
             let config = get_default_engine_config(
                 engine_client,
+                DummyOracle::default(),
                 uid.clone(),
                 genesis_hash,
                 namespace,
                 signer,
                 initial_validators.to_vec(),
-                None,
+                initial_state.clone(),
             );
             let engine = Engine::new(context.with_label(&uid), config).await;
             consensus_state_queries.insert(idx, engine.finalizer_mailbox.clone());
@@ -334,12 +351,13 @@ fn test_node_joins_later_no_checkpoint_not_in_genesis() {
         // since historical blocks were finalized by only those 4 validators
         let config = get_default_engine_config(
             engine_client,
+            DummyOracle::default(),
             uid.clone(),
             genesis_hash,
             namespace,
             signer_joining_later,
             initial_validators.to_vec(),
-            None,
+            initial_state, // pass initial state (start from genesis)
         );
         let engine = Engine::new(context.with_label(&uid), config).await;
 
