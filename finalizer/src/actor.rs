@@ -31,6 +31,7 @@ use summit_types::registry::Registry;
 use summit_types::utils::{is_last_block_of_epoch, is_penultimate_block_of_epoch};
 use summit_types::{Block, BlockAuxData, Digest, FinalizedHeader, PublicKey, Signature};
 use summit_types::{BlockEnvelope, EngineClient, consensus_state::ConsensusState};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024);
@@ -56,6 +57,9 @@ pub struct Finalizer<
     validator_withdrawal_period: u64, // in blocks
     validator_onboarding_limit_per_block: usize,
     oracle: O,
+    public_key: PublicKey,
+    validator_exit: bool,
+    cancellation_token: CancellationToken,
 }
 
 impl<
@@ -106,6 +110,9 @@ impl<
                 validator_minimum_stake: cfg.validator_minimum_stake,
                 validator_withdrawal_period: cfg.validator_withdrawal_period,
                 validator_onboarding_limit_per_block: cfg.validator_onboarding_limit_per_block,
+                public_key: cfg.public_key,
+                validator_exit: false,
+                cancellation_token: cfg.cancellation_token,
             },
             FinalizerMailbox::new(tx),
         )
@@ -138,7 +145,15 @@ impl<
 
         let mut last_committed_timestamp: Option<Instant> = None;
         let mut signal = self.context.stopped().fuse();
+        let cancellation_token = self.cancellation_token.clone();
+
         loop {
+            if self.validator_exit {
+                // If the validator was removed from the committee, trigger coordinated shutdown
+                info!("Validator no longer on the committee, shutting down");
+                self.cancellation_token.cancel();
+                break;
+            }
             select! {
                 msg = rx_finalize_blocks.next() => {
                     let Some((envelope, notifier)) = msg else {
@@ -168,8 +183,12 @@ impl<
                         },
                     }
                 }
+                _ = cancellation_token.cancelled().fuse() => {
+                    info!("finalizer received cancellation signal, exiting");
+                    break;
+                },
                 sig = &mut signal => {
-                    info!("finalizer terminated: {}", sig.unwrap());
+                    info!("runtime terminated, shutting down finalizer: {}", sig.unwrap());
                     break;
                 }
             }
@@ -341,6 +360,17 @@ impl<
                     account.status = ValidatorStatus::Active;
                 }
 
+                // If the node's public key is contained in the removed validator list,
+                // trigger an exit
+                if self
+                    .state
+                    .removed_validators
+                    .iter()
+                    .any(|pk| pk == &self.public_key)
+                {
+                    self.validator_exit = true;
+                }
+
                 // TODO(matthias): remove keys in removed_validators from state or set inactive?
                 self.registry.update_registry(
                     // We add a delta to the view because the views are initialized with fixed-size
@@ -461,7 +491,6 @@ impl<
                                 {
                                     continue; // Skip this withdrawal request
                                 }
-
                                 // If after this withdrawal the validator balance would be less than the
                                 // minimum stake, then the full validator balance is withdrawn.
                                 if account.balance
@@ -713,6 +742,28 @@ impl<
                 let height = self.state.get_latest_height();
                 let _ = sender.send(ConsensusStateResponse::LatestHeight(height));
             }
+            ConsensusStateRequest::GetValidatorBalance(public_key) => {
+                let mut key_bytes = [0u8; 32];
+                key_bytes.copy_from_slice(&public_key);
+
+                let balance = self
+                    .state
+                    .validator_accounts
+                    .get(&key_bytes)
+                    .map(|account| account.balance);
+                let _ = sender.send(ConsensusStateResponse::ValidatorBalance(balance));
+            }
         }
+    }
+}
+
+impl<
+    R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng,
+    C: EngineClient,
+    O: NetworkOracle<PublicKey>,
+> Drop for Finalizer<R, C, O>
+{
+    fn drop(&mut self) {
+        self.cancellation_token.cancel();
     }
 }
