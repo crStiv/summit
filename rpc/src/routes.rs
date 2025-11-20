@@ -8,13 +8,19 @@ use axum::{
 use commonware_codec::DecodeExt as _;
 use commonware_consensus::Block as ConsensusBlock;
 use commonware_consensus::simplex::signing_scheme::Scheme;
-use commonware_cryptography::{Committable, Signer};
+use commonware_cryptography::Committable;
 use commonware_utils::{from_hex_formatted, hex};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use ssz::Encode;
-use summit_types::{PrivateKey, PublicKey, utils::get_expanded_path};
+use summit_types::{KeyPaths, PublicKey, utils::get_expanded_path};
 
 use crate::{GenesisRpcState, PathSender, RpcState};
+
+#[derive(Serialize)]
+struct PublicKeysResponse {
+    node: String,
+    consensus: String,
+}
 
 #[derive(Deserialize)]
 struct ValidatorBalanceQuery {
@@ -32,7 +38,7 @@ impl RpcRoutes {
 
         Router::new()
             .route("/health", get(Self::handle_health_check))
-            .route("/get_public_key", get(Self::handle_get_pub_key::<S, B>))
+            .route("/get_public_keys", get(Self::handle_get_pub_keys::<S, B>))
             .route("/get_checkpoint", get(Self::handle_get_checkpoint::<S, B>))
             .route(
                 "/get_latest_height",
@@ -50,6 +56,8 @@ impl RpcRoutes {
         let state = Arc::new(state);
 
         Router::new()
+            .route("/health", get(Self::handle_health_check))
+            .route("/get_public_keys", get(Self::handle_get_pub_keys_genesis))
             .route("/send_genesis", post(Self::handle_send_genesis))
             .with_state(state)
     }
@@ -58,23 +66,30 @@ impl RpcRoutes {
         "Ok"
     }
 
-    async fn handle_get_pub_key<S: Scheme, B: ConsensusBlock + Committable>(
+    async fn handle_get_pub_keys<S: Scheme, B: ConsensusBlock + Committable>(
         State(state): State<Arc<RpcState<S, B>>>,
     ) -> Result<String, String> {
-        let private_key = Self::read_ed_key_from_path(&state.key_path)?;
+        let key_paths = KeyPaths::new(state.key_store_path.clone());
 
-        Ok(private_key.public_key().to_string())
+        let response = PublicKeysResponse {
+            node: key_paths.node_public_key()?,
+            consensus: key_paths.consensus_public_key()?,
+        };
+
+        serde_json::to_string(&response).map_err(|e| format!("Failed to serialize response: {}", e))
     }
 
-    fn read_ed_key_from_path(key_path: &str) -> Result<PrivateKey, String> {
-        let path = get_expanded_path(key_path).map_err(|_| "unable to get key_path")?;
-        let encoded_pk =
-            std::fs::read_to_string(path).map_err(|_| "Failed to read Private key file")?;
+    async fn handle_get_pub_keys_genesis(
+        State(state): State<Arc<GenesisRpcState>>,
+    ) -> Result<String, String> {
+        let key_paths = KeyPaths::new(state.key_store_path.clone());
 
-        let key = from_hex_formatted(&encoded_pk).ok_or("Invalid hex format for private key")?;
-        let pk = PrivateKey::decode(&*key).map_err(|_| "unable to decode private key")?;
+        let response = PublicKeysResponse {
+            node: key_paths.node_public_key()?,
+            consensus: key_paths.consensus_public_key()?,
+        };
 
-        Ok(pk)
+        serde_json::to_string(&response).map_err(|e| format!("Failed to serialize response: {}", e))
     }
 
     async fn handle_get_checkpoint<S: Scheme, B: ConsensusBlock + Committable>(

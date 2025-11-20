@@ -192,13 +192,19 @@ impl Command {
 
             // use the context async move to spawn a new runtime
             let genesis_path = flags.genesis_path.clone();
+            let key_store_path = flags.key_store_path.clone();
             let rpc_port = flags.rpc_port;
             let _rpc_handle = context
                 .with_label("rpc_genesis")
                 .spawn(move |_context| async move {
                     let genesis_sender = Command::check_sender(genesis_path, genesis_tx);
-                    if let Err(e) =
-                        start_rpc_server_for_genesis(genesis_sender, rpc_port, cloned_token).await
+                    if let Err(e) = start_rpc_server_for_genesis(
+                        genesis_sender,
+                        key_store_path,
+                        rpc_port,
+                        cloned_token,
+                    )
+                    .await
                     {
                         error!("RPC server failed: {}", e);
                     }
@@ -414,12 +420,18 @@ pub fn run_node_local(
         // use the context async move to spawn a new runtime
         let rpc_port = flags.rpc_port;
         let genesis_path = flags.genesis_path.clone();
+        let key_store_path = flags.key_store_path.clone();
         let _rpc_handle = context
             .with_label("rpc_genesis")
             .spawn(move |_context| async move {
                 let genesis_sender = Command::check_sender(genesis_path, genesis_tx);
-                if let Err(e) =
-                    start_rpc_server_for_genesis(genesis_sender, rpc_port, cloned_token).await
+                if let Err(e) = start_rpc_server_for_genesis(
+                    genesis_sender,
+                    key_store_path,
+                    rpc_port,
+                    cloned_token,
+                )
+                .await
                 {
                     error!("RPC server failed: {}", e);
                 }
