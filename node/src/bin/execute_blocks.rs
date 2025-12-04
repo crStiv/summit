@@ -114,10 +114,15 @@ async fn main() -> Result<()> {
                 println!("Processing block {}: hash={:?}", block_number, block_hash);
 
                 // Convert block data to Summit Block for check_payload
-                let parent_digest: Digest = if block_number == 0 {
-                    genesis_hash.into()
-                } else {
-                    (*parent_hash).into()
+                // Use genesis_hash as parent if parent_hash points to genesis, otherwise use parent_hash
+                let parent_digest: Digest = {
+                    let parent_digest: Digest = (*parent_hash).into();
+                    let genesis_digest: Digest = genesis_hash.into();
+                    if parent_digest == genesis_digest {
+                        genesis_digest
+                    } else {
+                        parent_digest
+                    }
                 };
 
                 // use block number as view
