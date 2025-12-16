@@ -43,6 +43,8 @@ use summit_types::network_oracle::DiscoveryOracle;
 use summit_types::{Genesis, PrivateKey, PublicKey, Validator, utils::get_expanded_path};
 use tracing::{Level, error};
 
+use commonware_codec::Error;
+
 pub const DEFAULT_DB_FOLDER: &str = "~/.seismic/consensus/store";
 
 pub const DEFAULT_ENGINE_IPC_PATH: &str = "/tmp/reth_engine_api.ipc";
@@ -176,12 +178,11 @@ impl Command {
 
         let maybe_checkpoint = if let Some(checkpoint) = &flags.checkpoint_or_default {
             if std::fs::exists(checkpoint).unwrap_or_default() {
-                // TODO(matthias): verify the checkpoint
                 let checkpoint_bytes: Vec<u8> =
                     std::fs::read(checkpoint).expect("failed to read checkpoint from disk");
                 let checkpoint = Checkpoint::from_ssz_bytes(&checkpoint_bytes)
                     .expect("failed to parse checkpoint");
-                let state = ConsensusState::try_from(checkpoint)
+                let state = ConsensusState::try_from(&checkpoint)
                     .expect("failed to create consensus state from checkpoint");
 
                 Some(state)
@@ -190,12 +191,11 @@ impl Command {
             }
         } else {
             flags.checkpoint_path.as_ref().map(|path| {
-                // TODO(matthias): verify the checkpoint
                 let checkpoint_bytes: Vec<u8> =
                     std::fs::read(path).expect("failed to read checkpoint from disk");
                 let checkpoint = Checkpoint::from_ssz_bytes(&checkpoint_bytes)
                     .expect("failed to parse checkpoint");
-                ConsensusState::try_from(checkpoint)
+                ConsensusState::try_from(&checkpoint)
                     .expect("failed to create consensus state from checkpoint")
             })
         };
@@ -254,7 +254,19 @@ impl Command {
                 .map(|hash_bytes| hash_bytes.try_into())
                 .expect("bad eth_genesis_hash")
                 .expect("bad eth_genesis_hash");
-            let initial_state = get_initial_state(genesis_hash, &committee, maybe_checkpoint);
+
+            // Validate checkpoint against genesis if present
+            let validated_checkpoint = maybe_checkpoint.and_then(|checkpoint| {
+                match validate_checkpoint_against_genesis(&checkpoint, genesis_hash) {
+                    Ok(()) => Some(checkpoint),
+                    Err(e) => {
+                        error!("Checkpoint validation failed: {}", e);
+                        None
+                    }
+                }
+            });
+
+            let initial_state = get_initial_state(genesis_hash, &committee, validated_checkpoint);
             let peers = initial_state.get_validator_keys();
 
             let engine_ipc_path = get_expanded_path(&flags.engine_ipc_path)
@@ -482,7 +494,19 @@ pub fn run_node_local(
             .map(|hash_bytes| hash_bytes.try_into())
             .expect("bad eth_genesis_hash")
             .expect("bad eth_genesis_hash");
-        let initial_state = get_initial_state(genesis_hash, &committee, checkpoint);
+
+        // Validate checkpoint against genesis if present
+        let validated_checkpoint = checkpoint.and_then(|checkpoint| {
+            match validate_checkpoint_against_genesis(&checkpoint, genesis_hash) {
+                Ok(()) => Some(checkpoint),
+                Err(e) => {
+                    error!("Checkpoint validation failed: {}", e);
+                    None
+                }
+            }
+        });
+
+        let initial_state = get_initial_state(genesis_hash, &committee, validated_checkpoint);
         let peers = initial_state.get_validator_keys();
 
         let engine_ipc_path =
@@ -637,6 +661,48 @@ pub fn run_node_local(
             error!(?e, "task failed");
         }
     })
+}
+
+/// Validates that a checkpoint is compatible with the given genesis hash.
+///
+/// Checks that the checkpoint's epoch_genesis_hash matches the genesis hash
+/// for genesis checkpoints, or that the finalized_block_hash is non-zero
+/// for later checkpoints.
+fn validate_checkpoint_against_genesis(
+    checkpoint: &ConsensusState,
+    genesis_hash: [u8; 32],
+) -> Result<(), Error> {
+    // For genesis checkpoints, epoch_genesis_hash must match genesis_hash
+    if checkpoint.get_latest_height() == 0 || checkpoint.get_epoch() == 0 {
+        let checkpoint_genesis = checkpoint.get_epoch_genesis_hash();
+        if checkpoint_genesis != genesis_hash {
+            return Err(Error::Invalid(
+                "Checkpoint",
+                "Checkpoint epoch_genesis_hash does not match current genesis hash",
+            ));
+        }
+    } else {
+        // For later checkpoints, verify that finalized_block_hash is non-zero
+        // and that epoch_genesis_hash matches (checkpoint should be from same chain)
+        let finalized_hash = checkpoint.get_forkchoice().finalized_block_hash;
+        if finalized_hash == B256::ZERO {
+            return Err(Error::Invalid(
+                "Checkpoint",
+                "Checkpoint has zero finalized_block_hash",
+            ));
+        }
+
+        // Verify epoch_genesis_hash matches to ensure checkpoint is from same chain
+        let checkpoint_genesis = checkpoint.get_epoch_genesis_hash();
+        if checkpoint_genesis != genesis_hash {
+            return Err(Error::Invalid(
+                "Checkpoint",
+                "Checkpoint epoch_genesis_hash does not match current genesis hash",
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn get_initial_state(
