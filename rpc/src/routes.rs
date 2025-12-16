@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::{GenesisRpcState, PathSender, RpcState};
 use alloy_primitives::{Address, U256, hex::FromHex as _};
 use axum::{
     Json, Router,
@@ -10,16 +11,15 @@ use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_consensus::Block as ConsensusBlock;
 use commonware_consensus::simplex::signing_scheme::Scheme;
 use commonware_cryptography::{Committable, Hasher as _, Sha256, Signer as _};
-use commonware_utils::{from_hex_formatted, hex};
+use commonware_utils::from_hex_formatted;
 use serde::{Deserialize, Serialize};
 use ssz::Encode;
 use summit_types::{
     KeyPaths, PROTOCOL_VERSION, PublicKey,
     execution_request::{DepositRequest, compute_deposit_data_root},
+    rpc::{CheckpointInfoRes, CheckpointRes},
     utils::get_expanded_path,
 };
-
-use crate::{GenesisRpcState, PathSender, RpcState};
 
 #[derive(Serialize)]
 struct PublicKeysResponse {
@@ -54,7 +54,18 @@ impl RpcRoutes {
         Router::new()
             .route("/health", get(Self::handle_health_check))
             .route("/get_public_keys", get(Self::handle_get_pub_keys::<S, B>))
-            .route("/get_checkpoint", get(Self::handle_get_checkpoint::<S, B>))
+            .route(
+                "/get_checkpoint/{epoch}",
+                get(Self::handle_get_checkpoint::<S, B>),
+            )
+            .route(
+                "/get_latest_checkpoint",
+                get(Self::handle_get_latest_checkpoint),
+            )
+            .route(
+                "/get_latest_checkpoint_info",
+                get(Self::handle_get_latest_checkpoint_info),
+            )
             .route(
                 "/get_latest_height",
                 get(Self::handle_latest_height::<S, B>),
@@ -188,18 +199,55 @@ impl RpcRoutes {
 
     async fn handle_get_checkpoint<S: Scheme, B: ConsensusBlock + Committable>(
         State(state): State<Arc<RpcState<S, B>>>,
-    ) -> Result<String, String> {
+        Path(epoch): Path<u64>,
+    ) -> Result<Json<CheckpointRes>, String> {
+        let maybe_checkpoint = state.finalizer_mailbox.clone().get_checkpoint(epoch).await;
+        let Some(checkpoint) = maybe_checkpoint else {
+            return Err("checkpoint not found".into());
+        };
+
+        Ok(Json(CheckpointRes {
+            checkpoint: checkpoint.data.into(),
+            digest: checkpoint.digest.0,
+            epoch,
+        }))
+    }
+
+    async fn handle_get_latest_checkpoint<S: Scheme, B: ConsensusBlock + Committable>(
+        State(state): State<Arc<RpcState<S, B>>>,
+    ) -> Result<Json<CheckpointRes>, String> {
         let maybe_checkpoint = state
             .finalizer_mailbox
             .clone()
             .get_latest_checkpoint()
             .await;
-        let (Some(checkpoint), _) = maybe_checkpoint else {
+        let (Some(checkpoint), epoch) = maybe_checkpoint else {
             return Err("checkpoint not found".into());
         };
 
-        let encoded = checkpoint.as_ssz_bytes();
-        Ok(hex(&encoded))
+        Ok(Json(CheckpointRes {
+            checkpoint: checkpoint.as_ssz_bytes(),
+            digest: checkpoint.digest.0,
+            epoch,
+        }))
+    }
+
+    async fn handle_get_latest_checkpoint_info<S: Scheme, B: ConsensusBlock + Committable>(
+        State(state): State<Arc<RpcState<S, B>>>,
+    ) -> Result<Json<CheckpointInfoRes>, String> {
+        let maybe_checkpoint = state
+            .finalizer_mailbox
+            .clone()
+            .get_latest_checkpoint()
+            .await;
+        let (Some(checkpoint), epoch) = maybe_checkpoint else {
+            return Err("checkpoint not found".into());
+        };
+
+        Ok(Json(CheckpointInfoRes {
+            epoch,
+            digest: checkpoint.digest.0,
+        }))
     }
 
     async fn handle_latest_height<S: Scheme, B: ConsensusBlock + Committable>(

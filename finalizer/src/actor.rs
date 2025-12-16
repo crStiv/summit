@@ -1,3 +1,4 @@
+use crate::archive::backup_with_enclave;
 use crate::db::{Config as StateConfig, FinalizerState};
 use crate::{FinalizerConfig, FinalizerMailbox, FinalizerMessage};
 use alloy_eips::eip4895::Withdrawal;
@@ -39,7 +40,7 @@ use summit_types::utils::{is_last_block_of_epoch, is_penultimate_block_of_epoch}
 use summit_types::{Block, BlockAuxData, Digest, FinalizedHeader, PublicKey, Signature};
 use summit_types::{EngineClient, consensus_state::ConsensusState};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024);
 
@@ -57,6 +58,7 @@ pub struct Finalizer<
     S: Signer<PublicKey = PublicKey>,
     V: Variant,
 > {
+    archive_mode: bool,
     mailbox: mpsc::Receiver<FinalizerMessage<bls12381_multisig::Scheme<PublicKey, V>, Block<S, V>>>,
     pending_height_notifys: BTreeMap<(u64, Digest), Vec<oneshot::Sender<()>>>,
     context: ContextCell<R>,
@@ -137,6 +139,7 @@ impl<
 
         (
             Self {
+                archive_mode: cfg.archive_mode,
                 context: ContextCell::new(context),
                 mailbox: rx,
                 engine_client: cfg.engine_client,
@@ -303,7 +306,7 @@ impl<
                 "executing finalized block directly (no prior fork state)"
             );
             execute_block(
-                &self.engine_client,
+                &mut self.engine_client,
                 &self.context,
                 &block,
                 &mut self.canonical_state,
@@ -442,6 +445,18 @@ impl<
                     .any(|pk| pk == &self.node_public_key)
                 {
                     self.validator_exit = true;
+                }
+            }
+
+            if self.archive_mode {
+                // Should always be there
+                if let Some(checkpoint) = &self.canonical_state.pending_checkpoint {
+                    if let Err(e) =
+                        backup_with_enclave(self.canonical_state.epoch, checkpoint.clone())
+                    {
+                        // This shouldnt be critical but it should be logged
+                        error!("Unable to backup with enclave: {}", e);
+                    }
                 }
             }
 
@@ -591,7 +606,7 @@ impl<
 
             // Execute the block into the cloned parent state
             execute_block(
-                &self.engine_client,
+                &mut self.engine_client,
                 &self.context,
                 &block,
                 &mut fork_state,
@@ -769,7 +784,7 @@ async fn execute_block<
     V: Variant,
     R: Storage + Metrics + Clock + Spawner + governor::clock::Clock + Rng,
 >(
-    engine_client: &C,
+    engine_client: &mut C,
     context: &ContextCell<R>,
     block: &Block<S, V>,
     state: &mut ConsensusState,

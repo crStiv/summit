@@ -19,7 +19,6 @@ use clap::Parser;
 use commonware_cryptography::Sha256;
 use commonware_cryptography::{Hasher, PrivateKeyExt, Signer, bls12381, ed25519::PrivateKey};
 use commonware_runtime::{Clock, Metrics as _, Runner as _, Spawner as _, tokio as cw_tokio};
-use commonware_utils::from_hex_formatted;
 use futures::{FutureExt, pin_mut};
 use ssz::Decode;
 use std::collections::VecDeque;
@@ -40,6 +39,7 @@ use summit_types::consensus_state::ConsensusState;
 use summit_types::execution_request::DepositRequest;
 use summit_types::execution_request::compute_deposit_data_root;
 use summit_types::reth::Reth;
+use summit_types::rpc::CheckpointRes;
 use tokio::sync::mpsc;
 use tracing::Level;
 
@@ -328,7 +328,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Retrieve checkpoint from first node
             println!("Retrieving checkpoint from node 0");
             let checkpoint_state = loop {
-                match get_checkpoint(node0_rpc_port).await {
+                match get_latest_checkpoint(node0_rpc_port).await {
                     Ok(Some(checkpoint)) => {
                         let state = ConsensusState::try_from(&checkpoint)
                             .expect("Failed to parse checkpoint");
@@ -629,15 +629,17 @@ async fn get_latest_height(rpc_port: u16) -> Result<u64, Box<dyn std::error::Err
     Ok(response.parse()?)
 }
 
-async fn get_checkpoint(rpc_port: u16) -> Result<Option<Checkpoint>, Box<dyn std::error::Error>> {
-    let url = format!("http://localhost:{}/get_checkpoint", rpc_port);
+async fn get_latest_checkpoint(
+    rpc_port: u16,
+) -> Result<Option<Checkpoint>, Box<dyn std::error::Error>> {
+    let url = format!("http://localhost:{}/get_latest_checkpoint", rpc_port);
     let response = reqwest::get(&url).await;
 
     match response {
         Ok(resp) if resp.status().is_success() => {
-            let hex_str = resp.text().await?;
-            let bytes = from_hex_formatted(&hex_str).ok_or("Failed to decode hex")?;
-            let checkpoint = Checkpoint::from_ssz_bytes(&bytes)
+            let checkpoint_resp: CheckpointRes = resp.json().await?;
+            //  let bytes = from_hex_formatted(&hex_str).ok_or("Failed to decode hex")?;
+            let checkpoint = Checkpoint::from_ssz_bytes(&checkpoint_resp.checkpoint)
                 .map_err(|e| format!("Failed to decode checkpoint: {:?}", e))?;
             Ok(Some(checkpoint))
         }
@@ -770,6 +772,7 @@ fn get_node_flags(node: usize) -> RunFlags {
     let path = format!("testnet/node{node}/");
 
     RunFlags {
+        archive_mode: false,
         key_store_path: path.clone(),
         store_path: format!("{path}db"),
         port: (26600 + (node * 10)) as u16,
@@ -784,6 +787,7 @@ fn get_node_flags(node: usize) -> RunFlags {
         #[cfg(any(feature = "base-bench", feature = "bench"))]
         bench_block_dir: None,
         checkpoint_path: None,
+        checkpoint_or_default: None,
         ip: None,
     }
 }
